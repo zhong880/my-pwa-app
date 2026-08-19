@@ -27,6 +27,7 @@
       holdings: deepCopy(SEED.holdings || []),
       watchlist: deepCopy(SEED.watchlist || []),
       dividendEvents: deepCopy(SEED.dividendEvents || []),
+      dividendBasis: deepCopy(SEED.dividendBasis || {}),
       hideSensitive: false
     };
   }
@@ -39,7 +40,7 @@
   function sym(code) {
     if (!code) return "¥";
     if (code.indexOf(".HK") >= 0) return "HK$";
-    var b = SEED.dividendBasis && SEED.dividendBasis[code];
+    var b = basis(code);
     if (b && b.currency === "HKD") return "HK$";
     return "¥";
   }
@@ -47,7 +48,9 @@
     var it = MARKET.items && MARKET.items[code];
     return it ? it.price : null;
   }
+  /* 取某代码的股息基数：优先用运行时录入的（state），回退到 SEED 预设 */
   function basis(code) {
+    if (state.dividendBasis && state.dividendBasis[code]) return state.dividendBasis[code];
     return (SEED.dividendBasis && SEED.dividendBasis[code]) || null;
   }
   function money(n, code) {
@@ -324,6 +327,17 @@
       state.holdings.push(obj);
     } else if (curType === "event") {
       state.dividendEvents.push(obj);
+      /* 登记派息时，自动把当次每股分红回填到 dividendBasis，
+         使持仓页「预计年息/回本进度」自动有数（可被手动覆盖） */
+      if (obj.code && obj.perShare != null) {
+        if (!state.dividendBasis) state.dividendBasis = {};
+        var cur = state.dividendBasis[obj.code] || {};
+        state.dividendBasis[obj.code] = {
+          perShare: obj.perShare,
+          currency: cur.currency || (obj.code.indexOf(".HK") >= 0 ? "HKD" : "CNY"),
+          label: obj.note || cur.label || obj.name + " 派息回填"
+        };
+      }
     } else if (curType === "watch") {
       state.watchlist.push(obj);
     }
@@ -354,6 +368,7 @@
         state.holdings = obj.holdings || [];
         state.watchlist = obj.watchlist || [];
         state.dividendEvents = obj.dividendEvents || [];
+        state.dividendBasis = obj.dividendBasis || {};
         if (typeof obj.hideSensitive === "boolean") state.hideSensitive = obj.hideSensitive;
         saveState();
         updateEye();
