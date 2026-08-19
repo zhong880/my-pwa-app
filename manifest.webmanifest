@@ -1,0 +1,20 @@
+{
+  "name": "攒息账本",
+  "short_name": "攒息账本",
+  "description": "个人股息 / 收息账本（本地优先，数据不上云）",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f6f5f1",
+  "theme_color": "#c9772e",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
