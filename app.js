@@ -4,7 +4,16 @@
 
   var LS_KEY = "jar_v2";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
-  var MARKET = window.MARKET || window.MARKET_EXAMPLE || { items: {}, updatedAt: "" };
+  var LS_MARKET_KEY = "jar_market_v1";
+  var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
+  function loadMarket() {
+    var scriptM = (window.MARKET && window.MARKET.items) ? window.MARKET : null;
+    var localM = null;
+    try { localM = JSON.parse(localStorage.getItem(LS_MARKET_KEY) || "null"); } catch (e) {}
+    if (scriptM && localM) return (new Date(localM.updatedAt || 0) >= new Date(scriptM.updatedAt || 0)) ? localM : scriptM;
+    return localM || scriptM || { items: {}, updatedAt: "" };
+  }
+  var MARKET = loadMarket();
   var FX = (SEED.meta && SEED.meta.fx && SEED.meta.fx.HKD_CNY) ? SEED.meta.fx.HKD_CNY : 1;
 
   /* ---------- 状态（localStorage 覆盖 SEED） ---------- */
@@ -357,6 +366,51 @@
     rd.readAsText(file);
   }
 
+  /* ---------- 行情刷新（端内拉取，跨设备自动更新） ---------- */
+  function toTencentCode(code) {
+    if (code.indexOf(".SZ") >= 0) return "sz" + code.slice(0, 6);
+    if (code.indexOf(".SH") >= 0) return "sh" + code.slice(0, 6);
+    if (code.indexOf(".HK") >= 0) return "hk" + code.replace(".HK", "");
+    return code;
+  }
+  function fetchQuotes(tcodes, onDone, onErr) {
+    var base = PROXY_URL ? PROXY_URL : "https://qt.gtimg.cn/q";
+    var s = document.createElement("script");
+    s.src = base + "?q=" + tcodes.join(",");
+    s.onload = function () { onDone(); try { document.body.removeChild(s); } catch (e) {} };
+    s.onerror = function () { if (onErr) onErr(); try { document.body.removeChild(s); } catch (e) {} };
+    document.body.appendChild(s);
+  }
+  function refreshPrices() {
+    var codes = (state.holdings || []).map(function (h) { return h.code; })
+      .concat((state.watchlist || []).map(function (w) { return w.code; }))
+      .filter(function (c, i, a) { return c && a.indexOf(c) === i; });
+    if (!codes.length) { toast("暂无可刷新的标的"); return; }
+    var btn = document.getElementById("refreshBtn");
+    if (btn) btn.classList.add("loading");
+    fetchQuotes(codes.map(toTencentCode), function () {
+      var ok = 0;
+      codes.forEach(function (code) {
+        var raw = window["v_" + toTencentCode(code)];
+        if (!raw) return;
+        var p = parseFloat(raw.split("~")[3]);
+        if (!isNaN(p) && p > 0) {
+          if (!MARKET.items[code]) MARKET.items[code] = {};
+          MARKET.items[code].price = p;
+          ok++;
+        }
+      });
+      MARKET.updatedAt = new Date().toISOString();
+      try { localStorage.setItem(LS_MARKET_KEY, JSON.stringify(MARKET)); } catch (e) {}
+      if (btn) btn.classList.remove("loading");
+      renderAll();
+      toast(ok ? ("已刷新 " + ok + " 只行情") : "未获取到行情");
+    }, function () {
+      if (btn) btn.classList.remove("loading");
+      toast("刷新失败，请检查网络");
+    });
+  }
+
   /* ---------- 渲染全部 ---------- */
   function renderAll() {
     renderHoldings(); renderCalendar(); renderWatch();
@@ -421,4 +475,7 @@
 
   updateEye();
   renderAll();
+  /* 每次打开自动拉取最新行情：GitHub Pages / 手机端也能自动更新 */
+  refreshPrices();
+  document.getElementById("refreshBtn").addEventListener("click", refreshPrices);
 })();

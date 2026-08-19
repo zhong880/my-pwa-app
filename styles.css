@@ -30,6 +30,12 @@ body {
   border: 1px solid var(--line); background: #fff; color: var(--brand);
   border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer;
 }
+.icon-btn:active { transform: scale(.96); }
+#refreshBtn.loading { color: var(--muted); pointer-events: none; }
+#refreshBtn.loading::after {
+  content: " ⟳"; display: inline-block; animation: jar-spin 0.8s linear infinite;
+}
+@keyframes jar-spin { to { transform: rotate(360deg); } }
 .tabs {
   display: flex; background: var(--card); border-bottom: 1px solid var(--line);
   position: sticky; top: 57px; z-index: 9;
