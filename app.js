@@ -367,47 +367,144 @@
   }
 
   /* ---------- 行情刷新（端内拉取，跨设备自动更新） ---------- */
+  /* 说明：GitHub Pages 为 HTTPS 环境，直连 qt.gtimg.cn 的 JSONP 可能因
+     混合内容(CSS)拦截或接口不稳定而失败。这里采用「fetch 优先 + JSONP 回退」
+     的双通道策略，并增加超时兜底与更明确的错误提示，保证刷新可见可诊断。 */
+  var QUOTE_TIMEOUT_MS = 8000; /* 单次行情请求超时（毫秒） */
+
   function toTencentCode(code) {
     if (code.indexOf(".SZ") >= 0) return "sz" + code.slice(0, 6);
     if (code.indexOf(".SH") >= 0) return "sh" + code.slice(0, 6);
     if (code.indexOf(".HK") >= 0) return "hk" + code.replace(".HK", "");
     return code;
   }
-  function fetchQuotes(tcodes, onDone, onErr) {
-    var base = PROXY_URL ? PROXY_URL : "https://qt.gtimg.cn/q";
-    var s = document.createElement("script");
-    s.src = base + "?q=" + tcodes.join(",");
-    s.onload = function () { onDone(); try { document.body.removeChild(s); } catch (e) {} };
-    s.onerror = function () { if (onErr) onErr(); try { document.body.removeChild(s); } catch (e) {} };
-    document.body.appendChild(s);
+
+  /* 解析腾讯接口返回的一行文本：v_sz000538="1~名称~...~价格~..." */
+  function parseQuoteLine(line) {
+    if (!line || line.indexOf("v_") !== 0) return null;
+    try {
+      var eq = line.indexOf("=");
+      var code = line.slice(2, eq);                 /* v_ 之后、= 之前 */
+      var s = line.slice(line.indexOf('"') + 1, line.lastIndexOf('"'));
+      var p = s.split("~");
+      if (p.length < 5) return null;
+      var price = parseFloat(p[3]);
+      if (isNaN(price) || price <= 0) return null;
+      return { code: code, name: p[1], price: price };
+    } catch (e) { return null; }
   }
+
+  /* 将腾讯返回的文本写入 MARKET。
+     codes 为原始股票代码（与 tcodes 按下标一一对应），返回成功条数 */
+  function applyQuotes(rawText, tcodes, codes) {
+    var ok = 0;
+    var lines = (rawText || "").split(";");
+    lines.forEach(function (line) {
+      var r = parseQuoteLine(line.trim());
+      if (!r) return;
+      /* 按下标反查原始代码（大小写不敏感） */
+      for (var i = 0; i < tcodes.length; i++) {
+        if (tcodes[i].toUpperCase() === r.code.toUpperCase()) {
+          var orig = codes[i];
+          if (!orig) return;
+          if (!MARKET.items[orig]) MARKET.items[orig] = {};
+          MARKET.items[orig].price = r.price;
+          if (r.name && !MARKET.items[orig].name) MARKET.items[orig].name = r.name;
+          ok++;
+          return;
+        }
+      }
+    });
+    return ok;
+  }
+
+  /* 通道1：fetch（需代理或接口支持 CORS）。返回 Promise<ok条数> */
+  function fetchQuotesByFetch(tcodes, codes) {
+    return new Promise(function (resolve, reject) {
+      var base = PROXY_URL ? PROXY_URL : "https://qt.gtimg.cn/q";
+      var url = base + "?q=" + tcodes.join(",");
+      var ctrl = ("AbortController" in window) ? new AbortController() : null;
+      var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, QUOTE_TIMEOUT_MS);
+      fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
+        .then(function (res) { return res.text(); })
+        .then(function (txt) {
+          clearTimeout(timer);
+          resolve(applyQuotes(txt, tcodes, codes));
+        })
+        .catch(function () { clearTimeout(timer); reject(); });
+    });
+  }
+
+  /* 通道2：JSONP 回退（腾讯接口原生支持 script 注入）。返回 Promise<ok条数> */
+  function fetchQuotesByJsonp(tcodes, codes) {
+    return new Promise(function (resolve, reject) {
+      var base = "https://qt.gtimg.cn/q"; /* JSONP 直连，留空 PROXY_URL 时可用 */
+      var s = document.createElement("script");
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return; done = true;
+        try { document.body.removeChild(s); } catch (e) {}
+        reject();
+      }, QUOTE_TIMEOUT_MS);
+      s.src = base + "?q=" + tcodes.join(",");
+      s.onload = function () {
+        if (done) return; done = true; clearTimeout(timer);
+        try { document.body.removeChild(s); } catch (e) {}
+        var ok = 0;
+        tcodes.forEach(function (tc, i) {
+          var raw = window["v_" + tc];
+          if (!raw) return;
+          var p = parseFloat(raw.split("~")[3]);
+          if (!isNaN(p) && p > 0) {
+            var orig = codes[i];
+            if (!MARKET.items[orig]) MARKET.items[orig] = {};
+            MARKET.items[orig].price = p;
+            ok++;
+          }
+        });
+        resolve(ok);
+      };
+      s.onerror = function () {
+        if (done) return; done = true; clearTimeout(timer);
+        try { document.body.removeChild(s); } catch (e) {}
+        reject();
+      };
+      document.body.appendChild(s);
+    });
+  }
+
   function refreshPrices() {
     var codes = (state.holdings || []).map(function (h) { return h.code; })
       .concat((state.watchlist || []).map(function (w) { return w.code; }))
       .filter(function (c, i, a) { return c && a.indexOf(c) === i; });
     if (!codes.length) { toast("暂无可刷新的标的"); return; }
+    var tcodes = codes.map(toTencentCode);
+
     var btn = document.getElementById("refreshBtn");
     if (btn) btn.classList.add("loading");
-    fetchQuotes(codes.map(toTencentCode), function () {
-      var ok = 0;
-      codes.forEach(function (code) {
-        var raw = window["v_" + toTencentCode(code)];
-        if (!raw) return;
-        var p = parseFloat(raw.split("~")[3]);
-        if (!isNaN(p) && p > 0) {
-          if (!MARKET.items[code]) MARKET.items[code] = {};
-          MARKET.items[code].price = p;
-          ok++;
-        }
-      });
-      MARKET.updatedAt = new Date().toISOString();
-      try { localStorage.setItem(LS_MARKET_KEY, JSON.stringify(MARKET)); } catch (e) {}
+
+    /* 默认走 JSONP（零部署最稳）；若已配置代理则 fetch 优先，两者互为回退 */
+    var attempt;
+    if (PROXY_URL) {
+      attempt = fetchQuotesByFetch(tcodes, codes)
+        .catch(function () { return fetchQuotesByJsonp(tcodes, codes).catch(function () { return -1; }); });
+    } else {
+      attempt = fetchQuotesByJsonp(tcodes, codes)
+        .catch(function () { return fetchQuotesByFetch(tcodes, codes).catch(function () { return -1; }); });
+    }
+
+    attempt.then(function (ok) {
       if (btn) btn.classList.remove("loading");
+      if (ok === -1) {
+        toast("刷新失败：请检查网络或配置行情代理");
+        return;
+      }
+      if (ok > 0) {
+        MARKET.updatedAt = new Date().toISOString();
+        try { localStorage.setItem(LS_MARKET_KEY, JSON.stringify({ items: MARKET.items, updatedAt: MARKET.updatedAt })); } catch (e) {}
+      }
       renderAll();
-      toast(ok ? ("已刷新 " + ok + " 只行情") : "未获取到行情");
-    }, function () {
-      if (btn) btn.classList.remove("loading");
-      toast("刷新失败，请检查网络");
+      toast(ok > 0 ? ("已刷新 " + ok + " 只行情") : "未获取到行情，请稍后重试");
     });
   }
 
