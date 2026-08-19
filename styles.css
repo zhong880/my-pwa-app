@@ -71,6 +71,13 @@ main { padding: 14px; }
   cursor: pointer; padding: 2px 7px; border-radius: 7px; line-height: 1;
 }
 .del-btn:hover { color: var(--red); background: #fdeceb; }
+/* 行内链接式按钮（补分红等） */
+.link-btn {
+  border: none; background: none; color: var(--amber); font-size: 12px;
+  cursor: pointer; padding: 1px 5px; border-radius: 6px; line-height: 1.4;
+  text-decoration: underline; margin-left: 4px;
+}
+.link-btn:hover { background: #fff4e0; }
 .name { font-weight: 700; font-size: 15px; }
 .code { font-size: 11px; color: var(--muted); margin-left: 6px; }
 .yield-badge {

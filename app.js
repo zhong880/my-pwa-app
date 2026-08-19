@@ -19,17 +19,28 @@
   /* ---------- 状态（localStorage 覆盖 SEED） ---------- */
   function deepCopy(o) { return JSON.parse(JSON.stringify(o)); }
   function loadState() {
-    try {
-      var raw = localStorage.getItem(LS_KEY);
-      if (raw) return JSON.parse(raw);
-    } catch (e) {}
-    return {
+    var def = {
       holdings: deepCopy(SEED.holdings || []),
       watchlist: deepCopy(SEED.watchlist || []),
       dividendEvents: deepCopy(SEED.dividendEvents || []),
       dividendBasis: deepCopy(SEED.dividendBasis || {}),
       hideSensitive: false
     };
+    try {
+      var raw = localStorage.getItem(LS_KEY);
+      if (raw) {
+        var s = JSON.parse(raw);
+        /* 与默认字段合并：旧备份/老版本 state 可能缺少新字段（如 dividendBasis） */
+        return {
+          holdings: s.holdings || def.holdings,
+          watchlist: s.watchlist || def.watchlist,
+          dividendEvents: s.dividendEvents || def.dividendEvents,
+          dividendBasis: s.dividendBasis || def.dividendBasis,
+          hideSensitive: typeof s.hideSensitive === "boolean" ? s.hideSensitive : def.hideSensitive
+        };
+      }
+    } catch (e) {}
+    return def;
   }
   function saveState() {
     try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {}
@@ -144,7 +155,8 @@
         item("成本", sen(money(c.cost, h.code))) +
         item("市值", c.mv != null ? sen(money(c.mv, h.code)) : "—") +
         item("盈亏", state.hideSensitive ? "••••" : profitTxt, state.hideSensitive ? "" : cls(c.profit)) +
-        item("预计年股息", c.annualDiv != null ? money(c.annualDiv, h.code) : "—") +
+        item("预计年股息", c.annualDiv != null ? money(c.annualDiv, h.code)
+          : ('— <button class="link-btn" data-basis="' + h.code + '">补分红</button>')) +
         item("回本进度", c.payback != null ? sen(c.payback.toFixed(1) + "%") : "—") +
         '</div>' +
         (yLabel ? '<div class="code" style="margin-top:6px">' + yLabel + '</div>' : '');
@@ -571,17 +583,38 @@
     saveState(); updateEye(); renderAll();
   });
 
-  /* 持仓删除（事件委托） */
+  /* 持仓列表点击（事件委托：删除 / 补分红） */
   document.getElementById("holdList").addEventListener("click", function (e) {
+    /* 补分红：直接填每股分红，便于无派息记录的老持仓补全预计年息 */
+    var bb = e.target.closest ? e.target.closest(".link-btn[data-basis]") : null;
+    if (bb) {
+      var code = bb.dataset.basis;
+      var h = null;
+      (state.holdings || []).forEach(function (x) { if (x.code === code) h = x; });
+      var nm = h ? h.name : code;
+      var input = prompt("为「" + nm + "」(" + code + ") 填写每股年分红（元）：\n用于计算预计年股息 / 回本进度", "");
+      if (input == null) return;
+      var ps = parseFloat(input);
+      if (isNaN(ps) || ps <= 0) { toast("输入无效，已取消"); return; }
+      if (!state.dividendBasis) state.dividendBasis = {};
+      var cur = state.dividendBasis[code] || {};
+      state.dividendBasis[code] = {
+        perShare: ps,
+        currency: cur.currency || (code.indexOf(".HK") >= 0 ? "HKD" : "CNY"),
+        label: cur.label || (nm + " 手动填分红")
+      };
+      saveState(); renderAll(); toast("已更新 " + nm + " 的每股分红");
+      return;
+    }
     var b = e.target.closest ? e.target.closest(".del-btn") : null;
     if (!b) return;
-    var code = b.dataset.del;
-    var h = null;
-    (state.holdings || []).forEach(function (x) { if (x.code === code) h = x; });
-    var nm = h ? h.name : code;
-    if (confirm("确认删除持仓「" + nm + "」？\n（仅删除持仓，派息日历不受影响，操作不可撤销）")) {
-      state.holdings = (state.holdings || []).filter(function (x) { return x.code !== code; });
-      saveState(); renderAll(); toast("已删除 " + nm);
+    var code2 = b.dataset.del;
+    var h2 = null;
+    (state.holdings || []).forEach(function (x) { if (x.code === code2) h2 = x; });
+    var nm2 = h2 ? h2.name : code2;
+    if (confirm("确认删除持仓「" + nm2 + "」？\n（仅删除持仓，派息日历不受影响，操作不可撤销）")) {
+      state.holdings = (state.holdings || []).filter(function (x) { return x.code !== code2; });
+      saveState(); renderAll(); toast("已删除 " + nm2);
     }
   });
 
