@@ -535,6 +535,85 @@
     });
   }
 
+  /* ---------- 分红公告自动抓取（东方财富 RPT_SHAREBONUS_DET） ---------- */
+  /* 说明：A股分红公告含「税前每股分红(PRETAX_BONUS_RMB)」与「除权除息日(EX_DIVIDEND_DATE)」。
+     抓到后回填 dividendBasis（用于预计年股息/回本进度），并自动建收息日历事件。
+     港股(.HK)东财无数据，自动跳过。 */
+  var DIVIDEND_TIMEOUT_MS = 8000; /* 单只分红请求超时（毫秒） */
+
+  function fetchDividendBasis(code) {
+    var emCode = code.replace(/\.(SZ|SH|HK)$/i, ""); /* 000538.SZ -> 000519 */
+    var isProxy = !!PROXY_URL;
+    var url = isProxy
+      ? (PROXY_URL + "/em-dividend?code=" + emCode)
+      : ("https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_SHAREBONUS_DET&columns=ALL&filter="
+        + encodeURIComponent('(SECURITY_CODE="' + emCode + '")')
+        + "&pageSize=5&sortColumns=PLAN_NOTICE_DATE&sortTypes=-1&source=WEB&client=WEB");
+    var ctrl = ("AbortController" in window) ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, DIVIDEND_TIMEOUT_MS);
+    return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        clearTimeout(timer);
+        var rows = (j && j.result && j.result.data) || [];
+        for (var i = 0; i < rows.length; i++) {
+          var d = rows[i];
+          /* 取最新一条「已实施/实施中」且含税前每股分红的记录 */
+          if (d.PRETAX_BONUS_RMB != null && parseFloat(d.PRETAX_BONUS_RMB) > 0
+            && /实施|派发|除权/.test(d.ASSIGN_PROGRESS || "")) {
+            return {
+              perShare: parseFloat(d.PRETAX_BONUS_RMB),
+              exDate: (d.EX_DIVIDEND_DATE || "").slice(0, 10),
+              note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || (d.SECURITY_NAME_ABBR + " 分红")
+            };
+          }
+        }
+        return null;
+      })
+      .catch(function () { clearTimeout(timer); return null; });
+  }
+
+  /* 自动抓取全部持仓的分红，回填 dividendBasis 并建收息日历 */
+  function autoFetchDividends() {
+    var hs = (state.holdings || []).filter(function (h) { return h.code && h.code.indexOf(".HK") < 0; });
+    if (!hs.length) return;
+    var pending = hs.map(function (h) {
+      return fetchDividendBasis(h.code).then(function (info) {
+        if (!info) return null;
+        if (!state.dividendBasis) state.dividendBasis = {};
+        var cur = state.dividendBasis[h.code] || {};
+        /* 仅当本地未手动配置时才自动覆盖，尊重用户手动录入 */
+        if (cur.perShare == null) {
+          state.dividendBasis[h.code] = {
+            perShare: info.perShare,
+            currency: (h.code.indexOf(".HK") >= 0) ? "HKD" : "CNY",
+            label: info.note
+          };
+        }
+        /* 自动建收息日历事件（同一除权日+代码不重复建） */
+        if (info.exDate && parseFloat(info.perShare) > 0) {
+          var exists = (state.dividendEvents || []).some(function (e) {
+            return e.code === h.code && e.exDate === info.exDate;
+          });
+          if (!exists) {
+            if (!state.dividendEvents) state.dividendEvents = [];
+            var shares = h.lots ? h.lots.filter(function (l) { return l.type === "buy"; })
+              .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
+            state.dividendEvents.push({
+              code: h.code, name: h.name, exDate: info.exDate,
+              perShare: info.perShare, shares: shares, note: info.note
+            });
+          }
+        }
+        return h.code;
+      });
+    });
+    Promise.all(pending).then(function (done) {
+      var ok = done.filter(Boolean).length;
+      if (ok > 0) { saveState(); renderAll(); toast("已自动抓分红 " + ok + " 只"); }
+    });
+  }
+
   /* ---------- 渲染全部 ---------- */
   function renderAll() {
     renderHoldings(); renderCalendar(); renderWatch();
@@ -623,4 +702,6 @@
   /* 每次打开自动拉取最新行情：GitHub Pages / 手机端也能自动更新 */
   refreshPrices();
   document.getElementById("refreshBtn").addEventListener("click", refreshPrices);
+  /* 每次打开自动抓取分红公告，回填预计年息并建收息日历 */
+  autoFetchDividends();
 })();
