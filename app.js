@@ -96,14 +96,27 @@
     var profit = (mv != null) ? mv - cost : null;
     var profitPct = (profit != null && cost) ? profit / cost * 100 : null;
     var b = basis(h.code);
-    var yld = (b && p) ? b.perShare / p * 100 : null;
-    var annualDiv = (b) ? b.perShare * shares : null;
-    // 累计收息（来自已登记派息事件）
+    // 累计收息（来自已登记派息事件，exDate 已过）
     var cum = 0;
     var todayStr = new Date().toISOString().slice(0, 10);
     (state.dividendEvents || []).forEach(function (e) {
       if (e.code === h.code && (!e.exDate || e.exDate <= todayStr)) cum += (e.perShare || 0) * (e.shares || 0);
     });
+    // 预计年股息：优先用「最近 12 个月内派息事件的每股合计」（事件驱动，对齐股息罐罐口径，
+    // 支持一年多次分红）；若无事件则回退用户手动录入的 dividendBasis.perShare（全年合计）。
+    var annualPerShare = null;
+    var oneYearAgo = new Date(); oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    var yAgoStr = oneYearAgo.toISOString().slice(0, 10);
+    var evtSum = 0, hasEvt = false;
+    (state.dividendEvents || []).forEach(function (e) {
+      if (e.code === h.code && e.exDate && e.exDate >= yAgoStr && e.exDate <= todayStr) {
+        evtSum += parseFloat(e.perShare || 0); hasEvt = true;
+      }
+    });
+    if (hasEvt) annualPerShare = evtSum;
+    else if (b && b.perShare != null) annualPerShare = b.perShare;
+    var annualDiv = (annualPerShare != null) ? annualPerShare * shares : null;
+    var yld = (annualPerShare != null && p) ? annualPerShare / p * 100 : null;
     var payback = (cost) ? cum / cost * 100 : null;
     return { shares: shares, cost: cost, mv: mv, profit: profit, profitPct: profitPct,
              yield: yld, annualDiv: annualDiv, cumDiv: cum, payback: payback };
@@ -171,36 +184,87 @@
     return '<div class="it"><div class="k">' + k + '</div><div class="v ' + (c || "") + '">' + v + '</div></div>';
   }
 
-  /* ---------- 渲染：收息日历 ---------- */
+  /* ---------- 渲染：收息日历（对齐"已收/预计全年 + 分红对账"） ---------- */
+  /* 金额折算：港股按 FX 折算人民币，保证与持仓汇总口径一致 */
+  function amountCNY(perShare, shares, code) {
+    var v = (perShare || 0) * (shares || 0);
+    if (code && code.indexOf(".HK") >= 0) v = v * FX;
+    return v;
+  }
+  /* 生成本地日期字符串 YYYY-MM-DD（避免 toISOString 的 UTC 偏移） */
+  function localDateStr(d) {
+    var y = d.getFullYear();
+    var m = ("0" + (d.getMonth() + 1)).slice(-2);
+    var day = ("0" + d.getDate()).slice(-2);
+    return y + "-" + m + "-" + day;
+  }
   function renderCalendar() {
     var evs = state.dividendEvents || [];
-    var total = 0, thisYear = 0;
-    var months = new Array(12).fill(0);
-    var yr = new Date().getFullYear();
+    var today = new Date();
+    var todayStr = localDateStr(today);
+    var yr = today.getFullYear();
+
+    /* 年度派息预测：本年度（今年）派息事件合计；支持一年多次分红。
+       无事件持仓回退 dividendBasis.perShare（全年合计兜底）。 */
+    var predictedAnnual = 0;
+    var yrBasis = {}; /* code -> 今年事件累计每股 */
     evs.forEach(function (e) {
-      var amt = (e.perShare || 0) * (e.shares || 0);
-      total += amt;
-      if (e.exDate && e.exDate.indexOf(yr) === 0) thisYear += amt;
-      var m = e.exDate ? parseInt(e.exDate.slice(5, 7), 10) : 0;
-      if (m >= 1 && m <= 12) months[m - 1] += amt;
+      if (e.code && e.exDate && e.exDate.indexOf(yr) === 0) {
+        yrBasis[e.code] = (yrBasis[e.code] || 0) + parseFloat(e.perShare || 0);
+      }
     });
-    var maxM = Math.max.apply(null, months.concat([1]));
+    (state.holdings || []).forEach(function (h) {
+      var c = calcHolding(h);
+      if (!c.shares) return;
+      var perShare = null;
+      if (yrBasis[h.code] != null) perShare = yrBasis[h.code];
+      else { var b = basis(h.code); if (b && b.perShare != null) perShare = b.perShare; }
+      if (perShare != null) predictedAnnual += amountCNY(perShare, c.shares, h.code);
+    });
+
+    /* 按事件拆分：已收（除权日已过）/ 预计（未到或待实施），并落月到月度柱 */
+    var collectedMonths = new Array(12).fill(0);
+    var predictedMonths = new Array(12).fill(0);
+    var collectedThisYear = 0; /* 今年已实际到账（用于分红对账） */
+    evs.forEach(function (e) {
+      var amt = amountCNY(e.perShare, e.shares, e.code);
+      var passed = e.exDate && e.exDate <= todayStr;
+      var m = e.exDate ? parseInt(e.exDate.slice(5, 7), 10) : 0;
+      if (passed) {
+        if (e.exDate.indexOf(yr) === 0) collectedThisYear += amt;
+        if (m >= 1 && m <= 12) collectedMonths[m - 1] += amt;
+      } else {
+        if (m >= 1 && m <= 12) predictedMonths[m - 1] += amt;
+      }
+    });
+
+    /* 分红对账：待收 = 预测 − 已收；进度 = 已收 / 预测 */
+    var pending = predictedAnnual - collectedThisYear;
+    if (pending < 0) pending = 0;
+    var progress = predictedAnnual > 0 ? collectedThisYear / predictedAnnual * 100 : 0;
+
     var sm = document.getElementById("calSummary");
     sm.innerHTML =
-      cell("已登记派息", money(total)) +
-      cell("今年派息", money(thisYear)) +
-      cell("派息笔数", evs.length + " 笔") +
-      cell("最近更新", (MARKET.updatedAt || "").slice(0, 10));
+      cell("年度派息预测", money(predictedAnnual)) +
+      cell("今年已收", money(collectedThisYear)) +
+      cell("待收", money(pending)) +
+      cell("收息进度", pct(progress), "small");
 
+    /* 月度现金流：已收(实色) + 预计(浅色) 堆叠柱 */
+    var monthsTot = new Array(12).fill(0);
+    for (var i = 0; i < 12; i++) monthsTot[i] = collectedMonths[i] + predictedMonths[i];
+    var maxM = Math.max.apply(null, monthsTot.concat([1]));
     var flow = document.getElementById("flowChart");
     flow.innerHTML = "";
     var names = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
-    months.forEach(function (v, i) {
+    monthsTot.forEach(function (v, i) {
       var col = document.createElement("div");
       col.className = "col";
-      var h = Math.round(v / maxM * 90);
+      var hGot = Math.round(collectedMonths[i] / maxM * 90);
+      var hWill = Math.round(predictedMonths[i] / maxM * 90);
       col.innerHTML = '<div class="amt">' + (v ? Math.round(v) : "") + '</div>' +
-        '<div class="bar" style="height:' + h + 'px"></div>' +
+        '<div class="bar"><div class="bar-will" style="height:' + hWill + 'px"></div>' +
+        '<div class="bar-got" style="height:' + hGot + 'px"></div></div>' +
         '<div class="lab">' + names[i] + '</div>';
       flow.appendChild(col);
     });
@@ -208,11 +272,15 @@
     var list = document.getElementById("eventList");
     list.innerHTML = "";
     evs.slice().sort(function (a, b) { return (a.exDate < b.exDate ? 1 : -1); }).forEach(function (e) {
-      var amt = (e.perShare || 0) * (e.shares || 0);
+      var amt = amountCNY(e.perShare, e.shares, e.code);
+      var passed = e.exDate && e.exDate <= todayStr;
+      var tag = passed
+        ? '<span class="tag got">已收</span>'
+        : '<span class="tag will">预计</span>';
       var row = document.createElement("div");
       row.className = "row";
       row.innerHTML = '<div class="line1"><span><span class="name">' + e.name + '</span>' +
-        '<span class="code">' + e.exDate + '</span></span>' +
+        '<span class="code">' + e.exDate + '</span>' + tag + '</span>' +
         '<span class="v" style="font-weight:700">' + money(amt, e.code) + '</span></div>' +
         '<div class="grid2">' +
         item("每股", money(e.perShare, e.code)) +
@@ -556,55 +624,47 @@
       .then(function (j) {
         clearTimeout(timer);
         var rows = (j && j.result && j.result.data) || [];
+        var out = [];
         for (var i = 0; i < rows.length; i++) {
           var d = rows[i];
-          /* 取最新一条「已实施/实施中」且含税前每股分红的记录 */
+          /* 收集所有「已实施/实施中」且含税前每股分红的记录（支持一年多次分红） */
           if (d.PRETAX_BONUS_RMB != null && parseFloat(d.PRETAX_BONUS_RMB) > 0
             && /实施|派发|除权/.test(d.ASSIGN_PROGRESS || "")) {
-            return {
+            out.push({
               perShare: parseFloat(d.PRETAX_BONUS_RMB),
               exDate: (d.EX_DIVIDEND_DATE || "").slice(0, 10),
               note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || (d.SECURITY_NAME_ABBR + " 分红")
-            };
+            });
           }
         }
-        return null;
+        return out.length ? out : null;
       })
       .catch(function () { clearTimeout(timer); return null; });
   }
 
-  /* 自动抓取全部持仓的分红，回填 dividendBasis 并建收息日历 */
+  /* 自动抓取全部持仓的分红，逐条建收息日历事件（预计年股息由事件累加得出，支持一年多次分红） */
   function autoFetchDividends() {
     var hs = (state.holdings || []).filter(function (h) { return h.code && h.code.indexOf(".HK") < 0; });
     if (!hs.length) return;
     var pending = hs.map(function (h) {
-      return fetchDividendBasis(h.code).then(function (info) {
-        if (!info) return null;
-        if (!state.dividendBasis) state.dividendBasis = {};
-        var cur = state.dividendBasis[h.code] || {};
-        /* 仅当本地未手动配置时才自动覆盖，尊重用户手动录入 */
-        if (cur.perShare == null) {
-          state.dividendBasis[h.code] = {
-            perShare: info.perShare,
-            currency: (h.code.indexOf(".HK") >= 0) ? "HKD" : "CNY",
-            label: info.note
-          };
-        }
-        /* 自动建收息日历事件（同一除权日+代码不重复建） */
-        if (info.exDate && parseFloat(info.perShare) > 0) {
-          var exists = (state.dividendEvents || []).some(function (e) {
+      return fetchDividendBasis(h.code).then(function (infos) {
+        if (!infos || !infos.length) return null;
+        if (!state.dividendEvents) state.dividendEvents = [];
+        var shares = h.lots ? h.lots.filter(function (l) { return l.type === "buy"; })
+          .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
+        /* 逐条建事件（同一除权日+代码不重复建），一年多次分红会建多条 */
+        infos.forEach(function (info) {
+          if (!info.exDate || !(parseFloat(info.perShare) > 0)) return;
+          var exists = state.dividendEvents.some(function (e) {
             return e.code === h.code && e.exDate === info.exDate;
           });
           if (!exists) {
-            if (!state.dividendEvents) state.dividendEvents = [];
-            var shares = h.lots ? h.lots.filter(function (l) { return l.type === "buy"; })
-              .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
             state.dividendEvents.push({
               code: h.code, name: h.name, exDate: info.exDate,
               perShare: info.perShare, shares: shares, note: info.note
             });
           }
-        }
+        });
         return h.code;
       });
     });

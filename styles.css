@@ -23,6 +23,8 @@ body {
   position: sticky; top: 0; z-index: 10;
 }
 .brand { display: flex; align-items: center; gap: 10px; }
+/* 顶部操作按钮：强制同一行不换行（刷新 / 导入 / 导出） */
+.top-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; }
 .logo { font-size: 26px; }
 .title { font-weight: 700; font-size: 17px; }
 .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
@@ -95,6 +97,13 @@ main { padding: 14px; }
 }
 .tag.buy { background: #e7f6ee; color: var(--green); }
 .tag.high { background: #fdeceb; color: var(--red); }
+.tag.got { background: #e7f6ee; color: var(--green); }
+.tag.will { background: var(--brand-soft); color: var(--brand); }
+/* 收息日历柱状图图例 */
+.flow-legend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); margin-top: 6px; }
+.flow-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+.flow-legend .g { background: var(--brand); }
+.flow-legend .w { background: rgba(201, 119, 46, .28); }
 
 .add-btn {
   width: 100%; margin-top: 14px; padding: 12px; border: 1px dashed var(--brand);
@@ -118,7 +127,9 @@ main { padding: 14px; }
 
 .flow { display: flex; align-items: flex-end; gap: 4px; height: 120px; }
 .flow .col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
-.flow .bar { width: 70%; background: var(--brand); border-radius: 4px 4px 0 0; min-height: 2px; }
+.flow .bar { width: 70%; height: 90px; display: flex; flex-direction: column; justify-content: flex-end; border-radius: 4px 4px 0 0; overflow: hidden; }
+.flow .bar-got { width: 100%; background: var(--brand); min-height: 0; }
+.flow .bar-will { width: 100%; background: rgba(201, 119, 46, .28); min-height: 0; }
 .flow .lab { font-size: 9px; color: var(--muted); margin-top: 3px; }
 .flow .amt { font-size: 9px; color: var(--ink); margin-bottom: 2px; }
 
