@@ -102,19 +102,21 @@
     (state.dividendEvents || []).forEach(function (e) {
       if (e.code === h.code && (!e.exDate || e.exDate <= todayStr)) cum += (e.perShare || 0) * (e.shares || 0);
     });
-    // 预计年股息：优先用「最近 12 个月内派息事件的每股合计」（事件驱动，对齐股息罐罐口径，
-    // 支持一年多次分红）；若无事件则回退用户手动录入的 dividendBasis.perShare（全年合计）。
+    // 预计年股息：取该股票「最近一个除权年份」内多条派息事件的每股合计（中报+年报同属一年，
+    // 正确相加；不会把不同年度公告混加）。无事件则回退 dividendBasis.perShare（全年合计兜底）。
     var annualPerShare = null;
-    var oneYearAgo = new Date(); oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-    var yAgoStr = oneYearAgo.toISOString().slice(0, 10);
-    var evtSum = 0, hasEvt = false;
+    var yrOf = {}; /* 除权年份 -> 每股合计 */
     (state.dividendEvents || []).forEach(function (e) {
-      if (e.code === h.code && e.exDate && e.exDate >= yAgoStr && e.exDate <= todayStr) {
-        evtSum += parseFloat(e.perShare || 0); hasEvt = true;
+      if (e.code === h.code && e.exDate && /^\d{4}/.test(e.exDate)) {
+        var y = e.exDate.slice(0, 4);
+        yrOf[y] = (yrOf[y] || 0) + parseFloat(e.perShare || 0);
       }
     });
-    if (hasEvt) annualPerShare = evtSum;
-    else if (b && b.perShare != null) annualPerShare = b.perShare;
+    var yrs = Object.keys(yrOf);
+    if (yrs.length) {
+      var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
+      annualPerShare = yrOf[maxYr];
+    } else if (b && b.perShare != null) annualPerShare = b.perShare;
     var annualDiv = (annualPerShare != null) ? annualPerShare * shares : null;
     var yld = (annualPerShare != null && p) ? annualPerShare / p * 100 : null;
     var payback = (cost) ? cum / cost * 100 : null;
@@ -204,21 +206,27 @@
     var todayStr = localDateStr(today);
     var yr = today.getFullYear();
 
-    /* 年度派息预测：本年度（今年）派息事件合计；支持一年多次分红。
-       无事件持仓回退 dividendBasis.perShare（全年合计兜底）。 */
+    /* 年度派息预测：取每只股票「最近一个除权年份」内多条派息事件合计（中报+年报同属一年，
+       正确相加，不跨年度混加）；支持一年多次分红。无事件持仓回退 dividendBasis.perShare。 */
     var predictedAnnual = 0;
-    var yrBasis = {}; /* code -> 今年事件累计每股 */
+    var yrBasis = {}; /* code -> { 年份: 每股合计 } */
     evs.forEach(function (e) {
-      if (e.code && e.exDate && e.exDate.indexOf(yr) === 0) {
-        yrBasis[e.code] = (yrBasis[e.code] || 0) + parseFloat(e.perShare || 0);
+      if (e.code && e.exDate && /^\d{4}/.test(e.exDate)) {
+        var y = e.exDate.slice(0, 4);
+        if (!yrBasis[e.code]) yrBasis[e.code] = {};
+        yrBasis[e.code][y] = (yrBasis[e.code][y] || 0) + parseFloat(e.perShare || 0);
       }
     });
     (state.holdings || []).forEach(function (h) {
       var c = calcHolding(h);
       if (!c.shares) return;
       var perShare = null;
-      if (yrBasis[h.code] != null) perShare = yrBasis[h.code];
-      else { var b = basis(h.code); if (b && b.perShare != null) perShare = b.perShare; }
+      var map = yrBasis[h.code];
+      if (map) {
+        var ys = Object.keys(map);
+        var maxY = ys.reduce(function (a, x) { return x > a ? x : a; });
+        perShare = map[maxY];
+      } else { var b = basis(h.code); if (b && b.perShare != null) perShare = b.perShare; }
       if (perShare != null) predictedAnnual += amountCNY(perShare, c.shares, h.code);
     });
 
@@ -575,9 +583,6 @@
     if (!codes.length) { toast("暂无可刷新的标的"); return; }
     var tcodes = codes.map(toTencentCode);
 
-    var btn = document.getElementById("refreshBtn");
-    if (btn) btn.classList.add("loading");
-
     /* 默认走 JSONP（零部署最稳）；若已配置代理则 fetch 优先，两者互为回退 */
     var attempt;
     if (PROXY_URL) {
@@ -589,7 +594,6 @@
     }
 
     attempt.then(function (ok) {
-      if (btn) btn.classList.remove("loading");
       if (ok === -1) {
         toast("刷新失败：请检查网络或配置行情代理");
         return;
@@ -624,25 +628,32 @@
       .then(function (j) {
         clearTimeout(timer);
         var rows = (j && j.result && j.result.data) || [];
-        var out = [];
+        /* 按「除权年份」归并：每只股票只保留最近一年份的多条记录（中报+年报同属一年，
+           正确相加；旧年度记录丢弃，避免跨年混加与污染累计收息）。 */
+        var byYear = {};
         for (var i = 0; i < rows.length; i++) {
           var d = rows[i];
-          /* 收集所有「已实施/实施中」且含税前每股分红的记录（支持一年多次分红） */
-          if (d.PRETAX_BONUS_RMB != null && parseFloat(d.PRETAX_BONUS_RMB) > 0
-            && /实施|派发|除权/.test(d.ASSIGN_PROGRESS || "")) {
-            out.push({
-              perShare: parseFloat(d.PRETAX_BONUS_RMB),
-              exDate: (d.EX_DIVIDEND_DATE || "").slice(0, 10),
-              note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || (d.SECURITY_NAME_ABBR + " 分红")
-            });
-          }
+          var ex = (d.EX_DIVIDEND_DATE || "").slice(0, 10);
+          if (!/^\d{4}/.test(ex)) continue;
+          if (!(d.PRETAX_BONUS_RMB != null && parseFloat(d.PRETAX_BONUS_RMB) > 0
+            && /实施|派发|除权/.test(d.ASSIGN_PROGRESS || ""))) continue;
+          var y = ex.slice(0, 4);
+          if (!byYear[y]) byYear[y] = [];
+          byYear[y].push({
+            perShare: parseFloat(d.PRETAX_BONUS_RMB),
+            exDate: ex,
+            note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || (d.SECURITY_NAME_ABBR + " 分红")
+          });
         }
-        return out.length ? out : null;
+        var yrs = Object.keys(byYear);
+        if (!yrs.length) return null;
+        var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
+        return byYear[maxYr]; /* 仅返回最近一个分红年度的多条记录 */
       })
       .catch(function () { clearTimeout(timer); return null; });
   }
 
-  /* 自动抓取全部持仓的分红，逐条建收息日历事件（预计年股息由事件累加得出，支持一年多次分红） */
+  /* 自动抓取全部持仓的分红，只保留最近一年份事件（支持一年多次分红，不跨年混加） */
   function autoFetchDividends() {
     var hs = (state.holdings || []).filter(function (h) { return h.code && h.code.indexOf(".HK") < 0; });
     if (!hs.length) return;
@@ -652,18 +663,17 @@
         if (!state.dividendEvents) state.dividendEvents = [];
         var shares = h.lots ? h.lots.filter(function (l) { return l.type === "buy"; })
           .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
+        /* 先清掉该代码所有「抓取来源」的旧年事件（note 含「分红」），避免跨年度堆积 */
+        state.dividendEvents = state.dividendEvents.filter(function (e) {
+          return !(e.code === h.code && e.note && /分红/.test(e.note));
+        });
         /* 逐条建事件（同一除权日+代码不重复建），一年多次分红会建多条 */
         infos.forEach(function (info) {
           if (!info.exDate || !(parseFloat(info.perShare) > 0)) return;
-          var exists = state.dividendEvents.some(function (e) {
-            return e.code === h.code && e.exDate === info.exDate;
+          state.dividendEvents.push({
+            code: h.code, name: h.name, exDate: info.exDate,
+            perShare: info.perShare, shares: shares, note: info.note
           });
-          if (!exists) {
-            state.dividendEvents.push({
-              code: h.code, name: h.name, exDate: info.exDate,
-              perShare: info.perShare, shares: shares, note: info.note
-            });
-          }
         });
         return h.code;
       });
@@ -761,7 +771,6 @@
   renderAll();
   /* 每次打开自动拉取最新行情：GitHub Pages / 手机端也能自动更新 */
   refreshPrices();
-  document.getElementById("refreshBtn").addEventListener("click", refreshPrices);
   /* 每次打开自动抓取分红公告，回填预计年息并建收息日历 */
   autoFetchDividends();
 })();
