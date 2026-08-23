@@ -96,11 +96,12 @@
     var profit = (mv != null) ? mv - cost : null;
     var profitPct = (profit != null && cost) ? profit / cost * 100 : null;
     var b = basis(h.code);
-    // 累计收息（来自已登记派息事件，exDate 已过）
+    // 累计收息（来自已登记派息事件，exDate 已过）：用实时持股 shares，与年股息口径一致，
+    // 避免把已卖出部分也算进累计收息（回本进度虚高）。
     var cum = 0;
     var todayStr = new Date().toISOString().slice(0, 10);
     (state.dividendEvents || []).forEach(function (e) {
-      if (e.code === h.code && (!e.exDate || e.exDate <= todayStr)) cum += (e.perShare || 0) * (e.shares || 0);
+      if (e.code === h.code && (!e.exDate || e.exDate <= todayStr)) cum += (e.perShare || 0) * shares;
     });
     // 预计年股息：取该股票「最近一个财年(fy)」内多条派息事件的每股合计（同财年中报+年报正确合并，
     // 不受除权日跨自然年影响）。无事件则回退 dividendBasis.perShare（全年合计兜底）。
@@ -656,8 +657,11 @@
           var rep = (d.REPORT_DATE || "").slice(0, 10);
           if (!(d.PRETAX_BONUS_RMB != null && parseFloat(d.PRETAX_BONUS_RMB) > 0
             && /实施|派发|除权/.test(d.ASSIGN_PROGRESS || ""))) continue;
-          /* 财年取报告期年份；无报告期时回退除权日年份 */
-          var y = /^\d{4}/.test(rep) ? rep.slice(0, 4) : (ex.slice(0, 4) || "");
+          /* 财年取报告期年份；无报告期时回退预案公告日(PLAN_NOTICE_DATE，与报告期同财年)，
+             仍无则回退除权日年份（边缘情况，可能把中报/年报分到两个年度）。 */
+          var y = /^\d{4}/.test(rep) ? rep.slice(0, 4)
+            : (/^\d{4}/.test(d.PLAN_NOTICE_DATE || "") ? (d.PLAN_NOTICE_DATE + "").slice(0, 4)
+              : (ex.slice(0, 4) || ""));
           if (!/^\d{4}$/.test(y)) continue;
           if (!byYear[y]) byYear[y] = [];
           byYear[y].push({
@@ -676,12 +680,12 @@
       .catch(function () { clearTimeout(timer); return null; });
   }
 
-  /* 清空旧的自动抓取分红数据：自动抓取事件（note 含「分红」）与自动兜底 dividendBasis。
-     保留用户手动录入的派息事件（note 不含「分红」）。每次打开页面调用，避免旧口径/旧倍率残留。 */
+  /* 清空旧的自动抓取分红数据：自动抓取事件（auto=true）与自动兜底 dividendBasis。
+     保留用户手动录入的派息事件（无 auto 标记）。每次打开页面调用，避免旧口径/旧倍率残留与叠加。 */
   function clearAutoDividendData() {
     if (state.dividendEvents) {
       state.dividendEvents = state.dividendEvents.filter(function (e) {
-        return !(e.note && /分红/.test(e.note));
+        return !e.auto; /* 仅保留非自动抓取（手动录入）的事件 */
       });
     }
     if (state.dividendBasis) {
@@ -705,16 +709,17 @@
         if (!state.dividendEvents) state.dividendEvents = [];
         var shares = h.lots ? h.lots.filter(function (l) { return l.type === "buy"; })
           .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
-        /* 先清掉该代码所有「抓取来源」的旧年事件（note 含「分红」），避免跨年度堆积 */
+        /* 先清掉该代码所有「自动抓取来源」的旧事件（auto=true），避免跨年度堆积/叠加 */
         state.dividendEvents = state.dividendEvents.filter(function (e) {
-          return !(e.code === h.code && e.note && /分红/.test(e.note));
+          return !(e.code === h.code && e.auto);
         });
         /* 逐条建事件（同一除权日+代码不重复建），一年多次分红会建多条 */
         infos.forEach(function (info) {
           if (!info.exDate || !(parseFloat(info.perShare) > 0)) return;
           state.dividendEvents.push({
             code: h.code, name: h.name, exDate: info.exDate, fy: info.fy,
-            perShare: info.perShare, shares: shares, note: info.note
+            perShare: info.perShare, shares: shares, note: info.note,
+            auto: true /* 标记为自动抓取来源，供 clearAutoDividendData 识别清除 */
           });
         });
         return h.code;
