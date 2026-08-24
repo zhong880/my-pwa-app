@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08241344";
+  var APP_VERSION = "1.0.08241402";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -368,7 +368,7 @@
         { k: "name", label: "名称", ph: "云南白药", req: true },
         { k: "market", label: "市场", type: "select", opts: ["A", "HK", "B"], def: "A" },
         { k: "date", label: "买入日期", ph: "2024-03-01", req: true },
-        { k: "shares", label: "股数", ph: "1000", req: true, num: true },
+        { k: "shares", label: "股数", ph: "1000", def: "100", req: true, num: true },
         { k: "price", label: "买入价", ph: "52.30", req: true, num: true },
         { k: "fee", label: "手续费", ph: "5", num: true, def: "0" }
       ]
@@ -398,6 +398,38 @@
   };
   var curType = null;
 
+  /* 在股票代码库 STOCK_DB 中按名称/代码模糊搜索（最多 12 条） */
+  function searchStockDB(q) {
+    q = (q || "").trim().toLowerCase();
+    if (!q || !window.STOCK_DB) return [];
+    var res = [];
+    for (var i = 0; i < window.STOCK_DB.length; i++) {
+      var s = window.STOCK_DB[i];
+      if (s.name.toLowerCase().indexOf(q) >= 0 || s.code.toLowerCase().indexOf(q) >= 0) {
+        res.push(s);
+        if (res.length >= 12) break;
+      }
+    }
+    return res;
+  }
+
+  /* 填代码后自动带出名称 + 当前股价（行情缺失则实时拉一次） */
+  function autoFillByCode(code) {
+    code = (code || "").trim().toUpperCase();
+    if (!code) return;
+    var nameEl = form.elements["name"], priceEl = form.elements["price"];
+    var it = MARKET.items && MARKET.items[code];
+    if (it && it.name && nameEl && !nameEl.value) nameEl.value = it.name;
+    if (it && it.price && priceEl && !priceEl.value) priceEl.value = it.price;
+    if ((!it || !it.name || !it.price)) {
+      fetchSingleQuote(code).then(function (q) {
+        if (!q) return;
+        if (q.name && nameEl && !nameEl.value) nameEl.value = q.name;
+        if (q.price && priceEl && !priceEl.value) priceEl.value = q.price;
+      });
+    }
+  }
+
   function openModal(type) {
     curType = type;
     var def = FORM_DEFS[type];
@@ -418,33 +450,60 @@
         if (type === "holding" && f.k === "date") dv = localDateStr(new Date());
         ctrl = '<input name="' + f.k + '" placeholder="' + (f.ph || "") + '"' +
           (f.num ? ' inputmode="decimal"' : '') + ' value="' + dv + '" />';
+        /* 持仓表单：名称输入框下方挂模糊搜索下拉 */
+        if (type === "holding" && f.k === "name") {
+          ctrl += '<div class="stock-suggest" data-suggest hidden></div>';
+        }
       }
       div.innerHTML = lab + ctrl;
       form.appendChild(div);
     });
-    /* 持仓表单：填代码后自动带出名称+当前股价 */
+    /* 持仓表单：名称模糊搜索 + 代码自动带出名称/股价 */
     if (type === "holding") {
       form.oninput = function (e) {
         var el = e.target;
-        if (!el || el.name !== "code") return;
-        var code = el.value.trim().toUpperCase();
-        if (!code) return;
-        var nameEl = form.elements["name"];
-        var priceEl = form.elements["price"];
-        var it = MARKET.items && MARKET.items[code];
-        if (it && it.name && nameEl && !nameEl.value) nameEl.value = it.name;
-        if (it && it.price && priceEl && !priceEl.value) priceEl.value = it.price;
-        /* 行情缺失时实时拉一次再回填 */
-        if ((!it || !it.name || !it.price)) {
-          fetchSingleQuote(code).then(function (q) {
-            if (!q) return;
-            if (q.name && nameEl && !nameEl.value) nameEl.value = q.name;
-            if (q.price && priceEl && !priceEl.value) priceEl.value = q.price;
-          });
+        if (!el) return;
+        if (el.name === "code") {
+          autoFillByCode(el.value);
+        } else if (el.name === "name") {
+          var q = el.value.trim();
+          var box = form.querySelector("[data-suggest]");
+          if (!box) return;
+          if (!q) { box.hidden = true; box.innerHTML = ""; return; }
+          var matches = searchStockDB(q);
+          if (!matches.length) { box.hidden = true; box.innerHTML = ""; return; }
+          box.innerHTML = matches.map(function (m) {
+            return '<div class="ss-item" data-code="' + m.code + '" data-name="' + m.name + '">' +
+              '<span class="ss-name">' + m.name + '</span><span class="ss-code">' + m.code + '</span></div>';
+          }).join("");
+          box.hidden = false;
         }
       };
+      /* 选中下拉项：填名称 + 代码，并触发股价自动填充 */
+      form.onclick = function (e) {
+        var it = e.target.closest ? e.target.closest(".ss-item") : null;
+        if (!it) return;
+        var code = it.dataset.code, name = it.dataset.name;
+        var nameEl = form.elements["name"], codeEl = form.elements["code"];
+        if (nameEl) nameEl.value = name;
+        if (codeEl) codeEl.value = code;
+        var box = form.querySelector("[data-suggest]");
+        if (box) box.hidden = true;
+        autoFillByCode(code);
+      };
+      /* 失焦时延迟关闭下拉（避免点选项前先消失） */
+      var nameInput = form.elements["name"];
+      if (nameInput) {
+        nameInput.addEventListener("blur", function () {
+          setTimeout(function () {
+            var box = form.querySelector("[data-suggest]");
+            if (box) box.hidden = true;
+          }, 150);
+        });
+      }
     } else {
       form.oninput = null;
+      form.onclick = null;
     }
     modal.hidden = false;
   }
