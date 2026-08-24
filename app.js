@@ -434,6 +434,7 @@
       delete obj.date; delete obj.shares; delete obj.price; delete obj.fee;
       state.holdings.push(obj);
     } else if (curType === "event") {
+      obj.manual = true; /* 标记为手动录入，clearAutoDividendData 不会清除 */
       state.dividendEvents.push(obj);
       /* 登记派息时，自动把当次每股分红回填到 dividendBasis，
          使持仓页「预计年息/回本进度」自动有数（可被手动覆盖） */
@@ -680,12 +681,12 @@
       .catch(function () { clearTimeout(timer); return null; });
   }
 
-  /* 清空旧的自动抓取分红数据：自动抓取事件（auto=true）与自动兜底 dividendBasis。
-     保留用户手动录入的派息事件（无 auto 标记）。每次打开页面调用，避免旧口径/旧倍率残留与叠加。 */
+  /* 清空旧的自动抓取分红数据：删掉所有「非手动录入」的事件（含旧版本无标记残留 + 自动抓取事件），
+     只保留用户手动登记的派息事件（manual=true）。每次打开调用，彻底重建，避免旧数据残留/叠加导致股息率虚高。 */
   function clearAutoDividendData() {
     if (state.dividendEvents) {
       state.dividendEvents = state.dividendEvents.filter(function (e) {
-        return !e.auto; /* 仅保留非自动抓取（手动录入）的事件 */
+        return e.manual === true; /* 仅保留手动录入的事件 */
       });
     }
     if (state.dividendBasis) {
@@ -709,9 +710,9 @@
         if (!state.dividendEvents) state.dividendEvents = [];
         var shares = h.lots ? h.lots.filter(function (l) { return l.type === "buy"; })
           .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
-        /* 先清掉该代码所有「自动抓取来源」的旧事件（auto=true），避免跨年度堆积/叠加 */
+        /* 先清掉该代码所有「非手动录入」的旧事件（含旧版无标记残留/自动抓取），避免叠加 */
         state.dividendEvents = state.dividendEvents.filter(function (e) {
-          return !(e.code === h.code && e.auto);
+          return !(e.code === h.code && e.manual !== true);
         });
         /* 逐条建事件（同一除权日+代码不重复建），一年多次分红会建多条 */
         infos.forEach(function (info) {
