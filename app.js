@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08241112";
+  var APP_VERSION = "1.0.08241142";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -409,12 +409,39 @@
           return '<option' + (o === f.def ? " selected" : "") + '>' + o + '</option>';
         }).join("") + '</select>';
       } else {
+        var dv = f.def || "";
+        /* 持仓表单：买入日期默认填今天 */
+        if (type === "holding" && f.k === "date") dv = localDateStr(new Date());
         ctrl = '<input name="' + f.k + '" placeholder="' + (f.ph || "") + '"' +
-          (f.num ? ' inputmode="decimal"' : '') + ' value="' + (f.def || "") + '" />';
+          (f.num ? ' inputmode="decimal"' : '') + ' value="' + dv + '" />';
       }
       div.innerHTML = lab + ctrl;
       form.appendChild(div);
     });
+    /* 持仓表单：填代码后自动带出名称+当前股价 */
+    if (type === "holding") {
+      form.oninput = function (e) {
+        var el = e.target;
+        if (!el || el.name !== "code") return;
+        var code = el.value.trim().toUpperCase();
+        if (!code) return;
+        var nameEl = form.elements["name"];
+        var priceEl = form.elements["price"];
+        var it = MARKET.items && MARKET.items[code];
+        if (it && it.name && nameEl && !nameEl.value) nameEl.value = it.name;
+        if (it && it.price && priceEl && !priceEl.value) priceEl.value = it.price;
+        /* 行情缺失时实时拉一次再回填 */
+        if ((!it || !it.name || !it.price)) {
+          fetchSingleQuote(code).then(function (q) {
+            if (!q) return;
+            if (q.name && nameEl && !nameEl.value) nameEl.value = q.name;
+            if (q.price && priceEl && !priceEl.value) priceEl.value = q.price;
+          });
+        }
+      };
+    } else {
+      form.oninput = null;
+    }
     modal.hidden = false;
   }
   function closeModal() { modal.hidden = true; }
@@ -608,6 +635,30 @@
         reject();
       };
       document.body.appendChild(s);
+    });
+  }
+
+  /* 单代码实时拉行情（用于新增持仓时自动带出名称+股价）。优先用已刷新的 MARKET，
+     缺失则临时拉一次。返回 Promise，resolve 后回填表单。 */
+  function fetchSingleQuote(code) {
+    return new Promise(function (resolve) {
+      var it = MARKET.items && MARKET.items[code];
+      if (it && it.name && it.price) { resolve(it); return; }
+      var tcs = [toTencentCode(code)];
+      var attempt;
+      if (PROXY_URL) {
+        attempt = fetchQuotesByFetch(tcs, [code])
+          .then(function () { resolve(MARKET.items[code] || null); })
+          .catch(function () { return null; });
+      } else {
+        attempt = fetchQuotesByJsonp(tcs, [code])
+          .then(function () { resolve(MARKET.items[code] || null); })
+          .catch(function () { return null; });
+      }
+      /* JSONP 路径 resolve 时机不同，上面 then 已处理；fetch 失败也 resolve(null) */
+      if (attempt && typeof attempt.catch === "function") {
+        attempt.catch(function () { resolve(MARKET.items[code] || null); });
+      }
     });
   }
 
