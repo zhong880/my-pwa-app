@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08241153";
+  var APP_VERSION = "1.0.08241344";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -936,23 +936,29 @@
     var stepBtn = e.target.closest ? e.target.closest(".step-btn") : null;
     if (stepBtn) {
       var sc = stepBtn.dataset.inc || stepBtn.dataset.dec;
-      var delta = stepBtn.dataset.inc ? 100 : -100;
+      var isInc = !!stepBtn.dataset.inc;
       var hh = null;
       (state.holdings || []).forEach(function (x) { if (x.code === sc) hh = x; });
       if (!hh) return;
-      if (!hh.lots || !hh.lots.length) {
-        hh.lots = [{ type: "buy", date: localDateStr(new Date()), shares: 0, price: price(sc) || 0, fee: 0 }];
-      }
-      /* 找到第一笔买入记录调整股数 */
-      var buy = null;
-      for (var i = 0; i < hh.lots.length; i++) { if (hh.lots[i].type === "buy") { buy = hh.lots[i]; break; } }
-      var curShares = hh.lots.filter(function (l) { return l.type === "buy"; })
-        .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0);
-      if (delta < 0 && curShares + delta < 0) { toast("持股数不能为负"); return; }
-      if (buy) {
-        buy.shares = Math.max(0, (parseFloat(buy.shares) || 0) + delta);
-      }
-      saveState(); renderAll(); toast((delta > 0 ? "＋100" : "－100") + " 股：" + (hh.name || sc));
+      if (!hh.lots) hh.lots = [];
+      var px = price(sc);
+      if (px == null) { toast("暂无「" + (hh.name || sc) + "」的当前股价，无法按市价加减"); return; }
+      /* 持股总数（用于减仓时防止变负） */
+      var total = hh.lots.reduce(function (s, l) {
+        var sh = parseFloat(l.shares) || 0;
+        return s + (l.type === "sell" ? -sh : sh);
+      }, 0);
+      if (!isInc && total - 100 < 0) { toast("持股数不能为负（当前 " + total + " 股）"); return; }
+      /* 新增一笔独立记录：价格=当前股价、日期=今天；买入加仓 / 卖出减仓 */
+      hh.lots.push({
+        type: isInc ? "buy" : "sell",
+        date: localDateStr(new Date()),
+        shares: 100,
+        price: px,
+        fee: 0
+      });
+      saveState(); renderAll();
+      toast((isInc ? "加仓 ＋100" : "减仓 －100") + " 股（市价 " + px + "）：" + (hh.name || sc));
       return;
     }
     var b = e.target.closest ? e.target.closest(".del-btn") : null;
