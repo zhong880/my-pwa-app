@@ -26,7 +26,8 @@ body {
 /* 顶部操作按钮：强制同一行不换行（刷新 / 导入 / 导出） */
 .top-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; }
 .logo { font-size: 26px; }
-.title { font-weight: 700; font-size: 17px; }
+.title { font-weight: 700; font-size: 17px; display: flex; align-items: baseline; gap: 6px; }
+.ver { font-size: 11px; font-weight: 500; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; letter-spacing: .3px; }
 .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .icon-btn {
   border: 1px solid var(--line); background: #fff; color: var(--brand);
