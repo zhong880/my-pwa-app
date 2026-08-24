@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08241430";
+  var APP_VERSION = "1.0.08241112";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -702,30 +702,63 @@
     saveState();
   }
 
-  /* 自动抓取全部持仓的分红，只保留最近一年份事件（支持一年多次分红，不跨年混加） */
+  /* 自动抓取分红：持仓 + 心选（去重、跳过港股）。
+     持仓：建收息日历事件（带股数，用于年股息/回本进度）；
+     心选：仅回填 dividendBasis（按「之前的分红=最近财年每股合计」），使心选「当前股息率」自动有数，
+           不建事件、不干扰持仓精确计算。 */
   function autoFetchDividends() {
-    var hs = (state.holdings || []).filter(function (h) { return h.code && h.code.indexOf(".HK") < 0; });
-    if (!hs.length) return;
-    var pending = hs.map(function (h) {
-      return fetchDividendBasis(h.code).then(function (infos) {
+    /* 合并持仓 + 心选，按 code 去重，跳过港股（东财无港股分红数据） */
+    var seen = {};
+    var targets = [];
+    (state.holdings || []).concat(state.watchlist || []).forEach(function (it) {
+      if (!it || !it.code || it.code.indexOf(".HK") >= 0) return;
+      if (seen[it.code]) return;
+      seen[it.code] = true;
+      var isHolding = (state.holdings || []).some(function (h) { return h.code === it.code; });
+      targets.push({ code: it.code, name: it.name || it.code, isHolding: isHolding,
+        lots: it.lots });
+    });
+    if (!targets.length) return;
+    var pending = targets.map(function (t) {
+      return fetchDividendBasis(t.code).then(function (infos) {
         if (!infos || !infos.length) return null;
-        if (!state.dividendEvents) state.dividendEvents = [];
-        var shares = h.lots ? h.lots.filter(function (l) { return l.type === "buy"; })
-          .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
-        /* 先清掉该代码所有「非手动录入」的旧事件（含旧版无标记残留/自动抓取），避免叠加 */
-        state.dividendEvents = state.dividendEvents.filter(function (e) {
-          return !(e.code === h.code && e.manual !== true);
-        });
-        /* 逐条建事件（同一除权日+代码不重复建），一年多次分红会建多条 */
-        infos.forEach(function (info) {
-          if (!info.exDate || !(parseFloat(info.perShare) > 0)) return;
-          state.dividendEvents.push({
-            code: h.code, name: h.name, exDate: info.exDate, fy: info.fy,
-            perShare: info.perShare, shares: shares, note: info.note,
-            auto: true /* 标记为自动抓取来源，供 clearAutoDividendData 识别清除 */
+        /* 取最近财年每股合计（infos 已是单财年多条合并后的数组，取第一条的 perShare 即可，
+           因 fetchDividendBasis 仅返回最近一个财年；若有多条同财年则累加） */
+        var annualPerShare = infos.reduce(function (s, info) {
+          return s + (parseFloat(info.perShare) || 0);
+        }, 0);
+        if (!(annualPerShare > 0)) return null;
+        /* 兜底回填 dividendBasis：心选用它算「当前股息率」；持仓也受益（无事件时有数） */
+        if (!state.dividendBasis) state.dividendBasis = {};
+        var cur = state.dividendBasis[t.code] || {};
+        /* 不覆盖手动补的分红（label 含「手动」） */
+        if (!(cur.label && /手动/.test(cur.label))) {
+          state.dividendBasis[t.code] = {
+            perShare: cur.perShare != null ? Math.max(cur.perShare, annualPerShare) : annualPerShare,
+            currency: cur.currency || "CNY",
+            label: cur.label || (t.name + " 自动抓取分红兜底")
+          };
+        }
+        /* 仅持仓才建收息事件（带股数） */
+        if (t.isHolding) {
+          if (!state.dividendEvents) state.dividendEvents = [];
+          var shares = t.lots ? t.lots.filter(function (l) { return l.type === "buy"; })
+            .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
+          /* 先清掉该代码所有「非手动录入」的旧事件（含旧版无标记残留/自动抓取），避免叠加 */
+          state.dividendEvents = state.dividendEvents.filter(function (e) {
+            return !(e.code === t.code && e.manual !== true);
           });
-        });
-        return h.code;
+          /* 逐条建事件（同一除权日+代码不重复建），一年多次分红会建多条 */
+          infos.forEach(function (info) {
+            if (!info.exDate || !(parseFloat(info.perShare) > 0)) return;
+            state.dividendEvents.push({
+              code: t.code, name: t.name, exDate: info.exDate, fy: info.fy,
+              perShare: info.perShare, shares: shares, note: info.note,
+              auto: true /* 标记为自动抓取来源，供 clearAutoDividendData 识别清除 */
+            });
+          });
+        }
+        return t.code;
       });
     });
     Promise.all(pending).then(function (done) {
