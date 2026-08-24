@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08241402";
+  var APP_VERSION = "1.0.08241454";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -66,9 +66,9 @@
     if (state.dividendBasis && state.dividendBasis[code]) return state.dividendBasis[code];
     return (SEED.dividendBasis && SEED.dividendBasis[code]) || null;
   }
-  function money(n, code) {
+  function money(n, code, forceCNY) {
     if (n == null || isNaN(n)) return "—";
-    var s = sym(code);
+    var s = forceCNY ? "¥" : sym(code);
     return s + n.toLocaleString("zh-CN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   }
   function pct(n) {
@@ -124,7 +124,8 @@
     var yld = (annualPerShare != null && p) ? annualPerShare / p * 100 : null;
     var payback = (cost) ? cum / cost * 100 : null;
     return { shares: shares, cost: cost, mv: mv, profit: profit, profitPct: profitPct,
-             yield: yld, annualDiv: annualDiv, cumDiv: cum, payback: payback };
+             yield: yld, annualDiv: annualDiv, cumDiv: cum, payback: payback,
+             currency: b ? (b.currency || "CNY") : "CNY" };
   }
 
   /* ---------- 渲染：持仓 ---------- */
@@ -177,8 +178,11 @@
         item("成本", sen(money(c.cost, h.code))) +
         item("市值", c.mv != null ? sen(money(c.mv, h.code)) : "—") +
         item("盈亏", state.hideSensitive ? "••••" : profitTxt, state.hideSensitive ? "" : cls(c.profit)) +
-        item("预计年股息", c.annualDiv != null ? money(c.annualDiv, h.code)
-          : ('— <button class="link-btn" data-basis="' + h.code + '">补分红</button>')) +
+        item("预计年股息", (c.annualDiv != null
+          ? (c.currency === "HKD" ? money(c.annualDiv * FX, h.code, true) : money(c.annualDiv, h.code))
+          : "—") +
+          '<button class="link-btn" data-basis="' + h.code + '" title="补填/修改每股年分红">' +
+          (c.annualDiv != null ? "改分红" : "补分红") + '</button>') +
         item("回本进度", c.payback != null ? sen(c.payback.toFixed(1) + "%") : "—") +
         '</div>' +
         (yLabel ? '<div class="code" style="margin-top:6px">' + yLabel + '</div>' : '');
@@ -756,10 +760,12 @@
     });
   }
 
-  /* ---------- 分红公告自动抓取（东方财富 RPT_SHAREBONUS_DET） ---------- */
-  /* 说明：A股分红公告含「税前每股分红(PRETAX_BONUS_RMB)」与「除权除息日(EX_DIVIDEND_DATE)」。
-     抓到后回填 dividendBasis（用于预计年股息/回本进度），并自动建收息日历事件。
-     港股(.HK)东财无数据，自动跳过。 */
+  /* ---------- 分红公告自动抓取 ---------- */
+  /* A股（东方财富 RPT_SHAREBONUS_DET）：含「税前每股分红(PRETAX_BONUS_RMB，每10股)」与「除权除息日」。
+     抓到后回填 dividendBasis 并自动建收息日历事件。
+     港股(.HK)：东财无数据，改走新浪港股分红页（fetchHKDividendBasis，需 PROXY_URL 代理），
+     仅回填 dividendBasis（金额港元、currency="HKD"），不建收息日历事件（除净日口径不同）；
+     渲染时按 FX 折算人民币显示。 */
   var DIVIDEND_TIMEOUT_MS = 8000; /* 单只分红请求超时（毫秒） */
 
   function fetchDividendBasis(code) {
@@ -809,6 +815,70 @@
       .catch(function () { clearTimeout(timer); return null; });
   }
 
+  /* 港股分红：抓新浪港股分红页（需 PROXY_URL 代理转发），解析「年度/派息内容/除净日」，
+     按年度归并（同行可能含中期+末期多次派息，港元值累加），返回最近一个年度的
+     [{ perShare: 每股合计港元, exDate: 最新除净日, fy: 年度 }]。金额已是「每股」，无需 ÷10。 */
+  function fetchHKDividendBasis(code) {
+    if (!PROXY_URL) return Promise.resolve(null); /* 港股需代理抓新浪，未配置则跳过 */
+    var hk = code.replace(/\.HK$/i, "");
+    var url = PROXY_URL + "/sina-hk?code=" + hk;
+    var ctrl = ("AbortController" in window) ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, DIVIDEND_TIMEOUT_MS);
+    return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
+      .then(function (r) { return r.text(); })
+      .then(function (html) {
+        clearTimeout(timer);
+        var doc = new DOMParser().parseFromString(html, "text/html");
+        var tables = doc.querySelectorAll("table");
+        var table = null;
+        for (var ti = 0; ti < tables.length; ti++) {
+          var tt = (tables[ti].textContent || "");
+          if (tt.indexOf("除净日") >= 0 && tt.indexOf("派息内容") >= 0) { table = tables[ti]; break; }
+        }
+        if (!table) return null;
+        var rows = table.querySelectorAll("tr");
+        var headerMap = null, yearIdx = -1, contentIdx = -1, exIdx = -1;
+        var byYear = {};
+        for (var i = 0; i < rows.length; i++) {
+          var cells = rows[i].querySelectorAll("td,th");
+          if (cells.length < 4) continue;
+          var txts = Array.prototype.map.call(cells, function (c) { return (c.textContent || "").trim(); });
+          /* 表头行：含「年度」「除净日」即作为列映射 */
+          if (!headerMap && txts.some(function (x) { return /年度/.test(x); })
+            && txts.some(function (x) { return /除净日/.test(x); })) {
+            for (var k = 0; k < txts.length; k++) {
+              if (/年度/.test(txts[k]) && yearIdx < 0) yearIdx = k;
+              if (/派息内容|派息/.test(txts[k]) && contentIdx < 0) contentIdx = k;
+              if (/除净日/.test(txts[k]) && exIdx < 0) exIdx = k;
+            }
+            if (yearIdx >= 0 && contentIdx >= 0) headerMap = {};
+            continue;
+          }
+          if (!headerMap) continue;
+          var year = txts[yearIdx];
+          var content = txts[contentIdx] || "";
+          var exCell = txts[exIdx] || "";
+          if (!/^\d{4}$/.test(year || "")) continue;
+          /* 同行可能含多次派息（中期+末期），全部港元值累加 */
+          var ms = content.match(/([\d.]+)\s*港元/g) || [];
+          var hkd = 0;
+          ms.forEach(function (s) { hkd += parseFloat(s.replace(/[^\d.]/g, "")) || 0; });
+          if (!(hkd > 0)) continue;
+          var exm = exCell.match(/(\d{4}-\d{2}-\d{2})/);
+          var exDate = exm ? exm[1] : "";
+          if (!byYear[year]) byYear[year] = { sum: 0, exDate: "" };
+          byYear[year].sum += hkd;
+          if (exDate && exDate > byYear[year].exDate) byYear[year].exDate = exDate;
+        }
+        var yrs = Object.keys(byYear);
+        if (!yrs.length) return null;
+        var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
+        return [{ perShare: byYear[maxYr].sum, exDate: byYear[maxYr].exDate, fy: maxYr,
+          note: "港股分红(新浪)" }];
+      })
+      .catch(function () { clearTimeout(timer); return null; });
+  }
+
   /* 打开页面自动合并「同代码重复持仓」：旧版本 bug 可能已把同代码存成多条记录，
      合并为单条（lots 多仓累加、名称/市场取首个非空），避免重复计算与误删。 */
   function mergeDuplicateHoldings() {
@@ -854,16 +924,16 @@
     saveState();
   }
 
-  /* 自动抓取分红：持仓 + 心选（去重、跳过港股）。
-     持仓：建收息日历事件（带股数，用于年股息/回本进度）；
-     心选：仅回填 dividendBasis（按「之前的分红=最近财年每股合计」），使心选「当前股息率」自动有数，
-           不建事件、不干扰持仓精确计算。 */
+  /* 自动抓取分红：持仓 + 心选（去重，含港股）。
+     A 股：东财接口（建收息事件 + 回填 dividendBasis）；
+     港股：新浪接口（仅回填 dividendBasis，金额港元，按汇率折算显示；不建收息日历事件，因港股除净日口径不同）。
+     心选：两类都仅回填 dividendBasis，使「当前股息率」自动有数，不建事件。 */
   function autoFetchDividends() {
-    /* 合并持仓 + 心选，按 code 去重，跳过港股（东财无港股分红数据） */
+    /* 合并持仓 + 心选，按 code 去重（含港股） */
     var seen = {};
     var targets = [];
     (state.holdings || []).concat(state.watchlist || []).forEach(function (it) {
-      if (!it || !it.code || it.code.indexOf(".HK") >= 0) return;
+      if (!it || !it.code) return;
       if (seen[it.code]) return;
       seen[it.code] = true;
       var isHolding = (state.holdings || []).some(function (h) { return h.code === it.code; });
@@ -872,10 +942,11 @@
     });
     if (!targets.length) return;
     var pending = targets.map(function (t) {
-      return fetchDividendBasis(t.code).then(function (infos) {
+      var isHK = /HK$/i.test(t.code);
+      var fetcher = isHK ? fetchHKDividendBasis : fetchDividendBasis;
+      return fetcher(t.code).then(function (infos) {
         if (!infos || !infos.length) return null;
-        /* 取最近财年每股合计（infos 已是单财年多条合并后的数组，取第一条的 perShare 即可，
-           因 fetchDividendBasis 仅返回最近一个财年；若有多条同财年则累加） */
+        /* 取最近财年每股合计（A股已单财年合并；港股单行已合计） */
         var annualPerShare = infos.reduce(function (s, info) {
           return s + (parseFloat(info.perShare) || 0);
         }, 0);
@@ -887,12 +958,13 @@
         if (!(cur.label && /手动/.test(cur.label))) {
           state.dividendBasis[t.code] = {
             perShare: cur.perShare != null ? Math.max(cur.perShare, annualPerShare) : annualPerShare,
-            currency: cur.currency || "CNY",
-            label: cur.label || (t.name + " 自动抓取分红兜底")
+            currency: isHK ? "HKD" : (cur.currency || "CNY"),
+            label: cur.label || (t.name + (isHK ? " 港股分红(新浪)" : " 自动抓取分红兜底"))
           };
         }
-        /* 仅持仓才建收息事件（带股数） */
-        if (t.isHolding) {
+        /* 仅持仓的 A 股才建收息事件（带股数，用于年股息/回本进度）；
+           港股不建事件（除净日口径不同，且已有 dividendBasis 算年股息/股息率）。 */
+        if (t.isHolding && !isHK) {
           if (!state.dividendEvents) state.dividendEvents = [];
           var shares = t.lots ? t.lots.filter(function (l) { return l.type === "buy"; })
             .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
@@ -977,12 +1049,16 @@
       var h = null;
       (state.holdings || []).forEach(function (x) { if (x.code === code) h = x; });
       var nm = h ? h.name : code;
-      var input = prompt("为「" + nm + "」(" + code + ") 填写每股年分红（元）：\n用于计算预计年股息 / 回本进度", "");
+      var cur = state.dividendBasis && state.dividendBasis[code];
+      var isEdit = cur && cur.perShare != null;
+      var prefill = cur && cur.perShare != null ? String(cur.perShare) : "";
+      var input = prompt((isEdit ? "修改「" : "为「") + nm + "」(" + code + ") 每股年分红（元）：\n用于计算预计年股息 / 回本进度",
+        prefill);
       if (input == null) return;
       var ps = parseFloat(input);
       if (isNaN(ps) || ps <= 0) { toast("输入无效，已取消"); return; }
       if (!state.dividendBasis) state.dividendBasis = {};
-      var cur = state.dividendBasis[code] || {};
+      cur = cur || {};
       state.dividendBasis[code] = {
         perShare: ps,
         currency: cur.currency || (code.indexOf(".HK") >= 0 ? "HKD" : "CNY"),
