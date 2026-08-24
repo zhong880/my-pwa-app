@@ -76,6 +76,16 @@ main { padding: 14px; }
   text-decoration: underline; margin-left: 4px;
 }
 .link-btn:hover { background: #fff4e0; }
+/* 持股数快速增减按钮 */
+.shares-btns { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.step-btn {
+  border: 1px solid var(--border); background: var(--card); color: var(--brand);
+  font-size: 14px; font-weight: 700; line-height: 1; cursor: pointer;
+  width: 22px; height: 22px; border-radius: 6px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.step-btn:hover { background: var(--brand); color: #fff; border-color: var(--brand); }
+.step-btn:active { transform: scale(0.92); }
 .name { font-weight: 700; font-size: 15px; }
 .code { font-size: 11px; color: var(--muted); margin-left: 6px; }
 .yield-badge {

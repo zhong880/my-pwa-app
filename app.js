@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08241142";
+  var APP_VERSION = "1.0.08241149";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -168,7 +168,11 @@
         '<button class="del-btn" data-del="' + h.code + '" title="删除持仓">✕</button>' +
         '</span></div>' +
         '<div class="grid2">' +
-        item("持股", c.shares + " 股") +
+        item("持股", c.shares + " 股" +
+          '<span class="shares-btns">' +
+          '<button class="step-btn" data-dec="' + h.code + '" title="减少100股">−</button>' +
+          '<button class="step-btn" data-inc="' + h.code + '" title="增加100股">＋</button>' +
+          '</span>') +
         item("现价", price(h.code) != null ? money(price(h.code), h.code) : "—") +
         item("成本", sen(money(c.cost, h.code))) +
         item("市值", c.mv != null ? sen(money(c.mv, h.code)) : "—") +
@@ -926,6 +930,29 @@
         label: cur.label || (nm + " 手动填分红")
       };
       saveState(); renderAll(); toast("已更新 " + nm + " 的每股分红");
+      return;
+    }
+    /* 快速增减持股数：每点一次 ±100 股（直接调整该持仓最近一笔买入的股数） */
+    var stepBtn = e.target.closest ? e.target.closest(".step-btn") : null;
+    if (stepBtn) {
+      var sc = stepBtn.dataset.inc || stepBtn.dataset.dec;
+      var delta = stepBtn.dataset.inc ? 100 : -100;
+      var hh = null;
+      (state.holdings || []).forEach(function (x) { if (x.code === sc) hh = x; });
+      if (!hh) return;
+      if (!hh.lots || !hh.lots.length) {
+        hh.lots = [{ type: "buy", date: localDateStr(new Date()), shares: 0, price: price(sc) || 0, fee: 0 }];
+      }
+      /* 找到第一笔买入记录调整股数 */
+      var buy = null;
+      for (var i = 0; i < hh.lots.length; i++) { if (hh.lots[i].type === "buy") { buy = hh.lots[i]; break; } }
+      var curShares = hh.lots.filter(function (l) { return l.type === "buy"; })
+        .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0);
+      if (delta < 0 && curShares + delta < 0) { toast("持股数不能为负"); return; }
+      if (buy) {
+        buy.shares = Math.max(0, (parseFloat(buy.shares) || 0) + delta);
+      }
+      saveState(); renderAll(); toast((delta > 0 ? "＋100" : "－100") + " 股：" + (hh.name || sc));
       return;
     }
     var b = e.target.closest ? e.target.closest(".del-btn") : null;
