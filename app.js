@@ -432,9 +432,21 @@
     });
     if (!ok) { toast("请填写必填项"); return; }
     if (curType === "holding") {
-      obj.lots = [{ type: "buy", date: obj.date, shares: obj.shares, price: obj.price, fee: obj.fee || 0 }];
+      var lot = { type: "buy", date: obj.date, shares: obj.shares, price: obj.price, fee: obj.fee || 0 };
       delete obj.date; delete obj.shares; delete obj.price; delete obj.fee;
-      state.holdings.push(obj);
+      /* 同代码持仓：合并新买入到原记录的 lots（多仓累计），避免重复记录导致的覆盖/重复计算 */
+      var existH = null;
+      for (var i = 0; i < state.holdings.length; i++) {
+        if (state.holdings[i].code === obj.code) { existH = state.holdings[i]; break; }
+      }
+      if (existH) {
+        if (!existH.lots) existH.lots = [];
+        existH.lots.push(lot);
+        if (obj.name && !existH.name) existH.name = obj.name; /* 名称缺失时补全 */
+      } else {
+        obj.lots = [lot];
+        state.holdings.push(obj);
+      }
     } else if (curType === "event") {
       obj.manual = true; /* 标记为手动录入，clearAutoDividendData 不会清除 */
       state.dividendEvents.push(obj);
@@ -683,6 +695,32 @@
       .catch(function () { clearTimeout(timer); return null; });
   }
 
+  /* 打开页面自动合并「同代码重复持仓」：旧版本 bug 可能已把同代码存成多条记录，
+     合并为单条（lots 多仓累加、名称/市场取首个非空），避免重复计算与误删。 */
+  function mergeDuplicateHoldings() {
+    var hs = state.holdings || [];
+    if (!hs.length) return;
+    var byCode = {};
+    var order = [];
+    hs.forEach(function (h) {
+      if (!h || !h.code) return;
+      if (byCode[h.code]) {
+        var dst = byCode[h.code];
+        if (!dst.lots) dst.lots = [];
+        if (h.lots && h.lots.length) dst.lots = dst.lots.concat(h.lots);
+        if (!dst.name && h.name) dst.name = h.name;
+        if (!dst.market && h.market) dst.market = h.market;
+      } else {
+        if (!h.lots) h.lots = [];
+        byCode[h.code] = h;
+        order.push(h.code);
+      }
+    });
+    if (order.length === hs.length) return; /* 无重复，无需改动 */
+    state.holdings = order.map(function (c) { return byCode[c]; });
+    saveState();
+  }
+
   /* 清空旧的自动抓取分红数据：删掉所有「非手动录入」的事件（含旧版本无标记残留 + 自动抓取事件），
      只保留用户手动登记的派息事件（manual=true）。每次打开调用，彻底重建，避免旧数据残留/叠加导致股息率虚高。 */
   function clearAutoDividendData() {
@@ -857,6 +895,8 @@
   renderAll();
   /* 每次打开自动拉取最新行情：GitHub Pages / 手机端也能自动更新 */
   refreshPrices();
+  /* 每次打开先合并同代码重复持仓（旧 bug 可能已存多条），避免重复计算/误删 */
+  mergeDuplicateHoldings();
   /* 每次打开先清空旧的自动抓取分红数据（避免 localStorage 残留旧口径/旧倍率），再重新抓取 */
   clearAutoDividendData();
   /* 每次打开自动抓取分红公告，回填预计年息并建收息日历 */
