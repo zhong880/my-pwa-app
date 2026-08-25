@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251032";
+  var APP_VERSION = "1.0.08251125";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -456,7 +456,7 @@
     for (var i = 0; i < segs.length; i++) {
       var seg = segs[i].split("~");
       if (seg.length < 5) continue;
-      if (seg[4] !== "GP") continue; /* 只要股票，过滤指数/权证 */
+      if ((seg[4] || "").indexOf("GP") !== 0) continue; /* 只要股票类(GP/GP-A/GP-H…)，过滤指数/权证/基金 */
       var full = toStdCode(seg[0], seg[1]);
       if (!full) continue;
       out.push({ code: full, name: seg[2], live: true });
