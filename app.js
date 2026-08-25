@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251427";
+  var APP_VERSION = "1.0.08251433";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -105,21 +105,8 @@
     (state.dividendEvents || []).forEach(function (e) {
       if (e.code === h.code && (!e.exDate || e.exDate <= todayStr)) cum += (e.perShare || 0) * shares;
     });
-    // 预计年股息：取该股票「最近一个财年(fy)」内多条派息事件的每股合计（同财年中报+年报正确合并，
-    // 不受除权日跨自然年影响）。无事件则回退 dividendBasis.perShare（全年合计兜底）。
-    var annualPerShare = null;
-    var yrOf = {}; /* 财年 -> 每股合计 */
-    (state.dividendEvents || []).forEach(function (e) {
-      var y = e.fy || (e.exDate ? e.exDate.slice(0, 4) : null);
-      if (e.code === h.code && y && /^\d{4}$/.test(y)) {
-        yrOf[y] = (yrOf[y] || 0) + parseFloat(e.perShare || 0);
-      }
-    });
-    var yrs = Object.keys(yrOf);
-    if (yrs.length) {
-      var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
-      annualPerShare = yrOf[maxYr];
-    } else if (b && b.perShare != null) annualPerShare = b.perShare;
+    // 预计年股息：用 TTM 口径（最近两个财年 perShare 合计 × 股数），与股息率、收息日历预测一致。
+    var annualPerShare = annualPerShareOf(h.code);
     var annualDiv = (annualPerShare != null) ? annualPerShare * shares : null;
     /* 股息率显示用 TTM 口径（最近两财年合计），对齐腾讯自选股；annualDiv 仍用单财年口径（年度预测不动） */
     var yld = (annualPerShareOf(h.code) != null && p) ? annualPerShareOf(h.code) / p * 100 : null;
@@ -218,27 +205,13 @@
     var todayStr = localDateStr(today);
     var yr = today.getFullYear();
 
-    /* 年度派息预测：取每只股票「最近一个财年(fy)」内多条派息事件合计（同财年中报+年报正确合并，
-       不受除权日跨年影响）；支持一年多次分红。无事件持仓回退 dividendBasis.perShare。 */
+    /* 年度派息预测：TTM 口径 = 每只股票「最近两个财年(fy) perShare 合计」× 股数，
+       与股息率、持仓卡片「预计年股息」口径一致（对齐腾讯自选股）。币种换算保留原 amountCNY 处理。 */
     var predictedAnnual = 0;
-    var yrBasis = {}; /* code -> { 财年: 每股合计 } */
-    evs.forEach(function (e) {
-      var y = e.fy || (e.exDate ? e.exDate.slice(0, 4) : null);
-      if (e.code && y && /^\d{4}$/.test(y)) {
-        if (!yrBasis[e.code]) yrBasis[e.code] = {};
-        yrBasis[e.code][y] = (yrBasis[e.code][y] || 0) + parseFloat(e.perShare || 0);
-      }
-    });
     (state.holdings || []).forEach(function (h) {
       var c = calcHolding(h);
       if (!c.shares) return;
-      var perShare = null;
-      var map = yrBasis[h.code];
-      if (map) {
-        var ys = Object.keys(map);
-        var maxY = ys.reduce(function (a, x) { return x > a ? x : a; });
-        perShare = map[maxY];
-      } else { var b = basis(h.code); if (b && b.perShare != null) perShare = b.perShare; }
+      var perShare = annualPerShareOf(h.code); /* 两财年合计，含回退 basis */
       if (perShare != null) predictedAnnual += amountCNY(perShare, c.shares, h.code);
     });
 
