@@ -582,7 +582,8 @@
   }
 
   /* 反推目标价：填某档目标股息率 N（targetYieldN）→ 用分红数据反推该档目标价（targetPriceN）。
-     三档都支持（N=1/2/3）。本地无数据时按本工程方式抓取一次再反推。不覆盖手动填的目标价。 */
+     三档都支持（N=1/2/3）。本地无数据时按本工程方式抓取一次再反推。
+     目标价始终跟随目标股息率重算（手填的目标价也会被新的目标股息率覆盖）。 */
   function autoFillTargetPrice(n) {
     n = n || 1;
     var codeEl = form.elements["code"];
@@ -592,10 +593,9 @@
     var code = codeEl.value.trim();
     var y = parseFloat(yEl.value);
     if (!code || !y) return;
-    if (pEl.value.trim()) return; /* 已手动填目标价，不覆盖 */
     var ps = annualPerShareOf(code);
     if (ps != null) { pEl.value = (ps / (y / 100)).toFixed(2); return; }
-    /* 本地无分红数据：按本工程方式抓取一次，成功后再反推目标价 */
+    /* 本地无分红数据：按本工程方式抓取一次，成功后再重算目标价 */
     var isHK = code.indexOf(".HK") >= 0;
     var nm = (form.elements["name"] || {}).value || code;
     ensureDividendBasis(code, nm, isHK).then(function (ok) {
@@ -604,7 +604,7 @@
       if (form.elements["code"].value.trim() !== code) return;
       if (form.elements["targetYield" + n].value.trim() !== String(y)) return;
       var ps2 = annualPerShareOf(code);
-      if (ps2 != null && !form.elements["targetPrice" + n].value.trim()) {
+      if (ps2 != null) {
         form.elements["targetPrice" + n].value = (ps2 / (y / 100)).toFixed(2);
         toast("已抓取 " + nm + " 分红数据并反推第" + n + "档目标价");
       }
@@ -649,7 +649,7 @@
         if (!el) return;
         if (el.name === "code") {
           autoFillByCode(el.value);
-          if (type === "watch") [1, 2, 3].forEach(autoFillTargetPrice); /* 代码变了，三档都尝试反推 */
+          /* 反推目标价改在 onchange（失焦/回车）时执行，避免输入中途跳动 */
         } else if (el.name === "name") {
           var q = el.value.trim();
           var box = form.querySelector("[data-suggest]");
@@ -671,8 +671,18 @@
               renderSuggest(box, merged, live.length > 0);
             });
           }
-        } else if (/^targetYield[123]$/.test(el.name) && type === "watch") {
-          autoFillTargetPrice(+el.name.slice(-1)); /* 填某档目标股息率 → 反推该档目标价 */
+        }
+        /* targetYield 的实时反推已移除，改由 onchange 触发，不再于输入中途改变目标价 */
+      };
+      /* 反推目标价：失焦/回车（change）时才执行，输入过程中不跳动 */
+      form.onchange = function (e) {
+        if (type !== "watch") return;
+        var el = e.target;
+        if (!el) return;
+        if (el.name === "code") {
+          [1, 2, 3].forEach(autoFillTargetPrice);
+        } else if (/^targetYield[123]$/.test(el.name)) {
+          autoFillTargetPrice(+el.name.slice(-1));
         }
       };
       /* 选中下拉项：填名称 + 代码，触发股价自动填充；心选额外反推目标价 */
@@ -702,6 +712,7 @@
     } else {
       form.oninput = null;
       form.onclick = null;
+      form.onchange = null;
     }
     modal.hidden = false;
   }
