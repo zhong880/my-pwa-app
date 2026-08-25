@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251125";
+  var APP_VERSION = "1.0.08251127";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -329,8 +329,10 @@
       row.className = "row";
       row.innerHTML = '<div class="line1"><span><span class="name">' + w.name + '</span>' +
         '<span class="code">' + w.code + '</span>' + (w.group ? '<span class="tag">' + w.group + '</span>' : '') + '</span>' +
+        '<span class="line1-right">' +
         (yld != null ? '<span class="yield-badge">' + yld.toFixed(2) + '%</span>' : '<span class="yield-badge">—</span>') +
-        '</div>' +
+        '<button class="del-btn" data-del="' + w.code + '" title="删除心选">✕</button>' +
+        '</span></div>' +
         '<div class="grid2">' +
         item("现价", p != null ? money(p, w.code) : "—") +
         item("目标价", w.targetPrice ? money(w.targetPrice, w.code) : "—") +
@@ -1276,6 +1278,20 @@
     var nm2 = h2 ? h2.name : code2;
     if (confirm("确认删除持仓「" + nm2 + "」？\n（仅删除持仓，派息日历不受影响，操作不可撤销）")) {
       state.holdings = (state.holdings || []).filter(function (x) { return x.code !== code2; });
+      saveState(); renderAll(); toast("已删除 " + nm2);
+    }
+  });
+
+  /* 心选列表点击（事件委托：删除） */
+  document.getElementById("watchList").addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest(".del-btn") : null;
+    if (!b) return;
+    var code2 = b.dataset.del;
+    var w2 = null;
+    (state.watchlist || []).forEach(function (x) { if (x.code === code2) w2 = x; });
+    var nm2 = w2 ? w2.name : code2;
+    if (confirm("确认删除心选「" + nm2 + "」？\n（仅删除心选，操作不可撤销）")) {
+      state.watchlist = (state.watchlist || []).filter(function (x) { return x.code !== code2; });
       saveState(); renderAll(); toast("已删除 " + nm2);
     }
   });
