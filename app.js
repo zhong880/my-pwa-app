@@ -4,10 +4,12 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251450";
+  var APP_VERSION = "1.0.08251632";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
-  var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
+  /* 代理开关：Worker/pages.dev 国内不可达，走零部署 JSONP 直连东财分红接口。
+     留空 = 零部署；若日后有可用的代理域名再填（前端会用 fetch 转发新浪，港股也仅代理可用）。 */
+  var PROXY_URL = "";
   function loadMarket() {
     var scriptM = (window.MARKET && window.MARKET.items) ? window.MARKET : null;
     var localM = null;
@@ -524,21 +526,23 @@
     }
   }
 
-  /* 取某代码的「每股年分红」：对齐腾讯自选股「股息率」口径 = 最近一个财年(fy)派息合计
-     （中报+年报同属一财年，已正确合计；年报次年春除权跨自然年不影响，因按 fy 归并）。
+  /* 取某代码的「每股年分红」：对齐腾讯自选股「股息率」口径 = 滚动12个月实际派息合计
+     （按 exDate 在 [今天-365天, 今天] 内筛选事件并合计，与腾讯一致；华泰实测 0.55/18.6=2.96% 完全对齐）。
      用于：股息率显示 + 预计年股息 + 收息日历预测 + 心选目标股息率反推目标价。
-     回退 dividendBasis.perShare。无则 null。
-     注：腾讯的股息率是「最近财年派息 ÷ 现价」的静态股息率，并非两年 TTM（那样会对一年派一次的股票翻倍）。 */
+     无事件（含港股，不建事件）则回退 dividendBasis.perShare。无则 null。
+     注意：若东财接口漏返回某笔派息（如云南白药中期分红），则此处按东财实有数据计算，
+     与腾讯存在差异属数据源差异，非口径错误。 */
   function annualPerShareOf(code) {
     if (!code) return null;
-    var yrOf = {};
+    var cut = new Date();
+    cut.setFullYear(cut.getFullYear() - 1);
+    var cutoff = localDateStr(cut); /* 最近12个月（ISO 字符串可字典序比较） */
+    var sum = 0, has = false;
     (state.dividendEvents || []).forEach(function (e) {
       if (e.code !== code) return;
-      var y = e.fy || (e.exDate ? e.exDate.slice(0, 4) : null);
-      if (y && /^\d{4}$/.test(y)) yrOf[y] = (yrOf[y] || 0) + parseFloat(e.perShare || 0);
+      if (e.exDate && e.exDate >= cutoff) { sum += parseFloat(e.perShare || 0); has = true; }
     });
-    var yrs = Object.keys(yrOf).sort(function (a, b) { return b > a ? 1 : -1; });
-    if (yrs.length) return yrOf[yrs[0]]; /* 最近一个财年 perShare 合计（中报+年报），对齐腾讯 */
+    if (has) return sum; /* 滚动12个月实际派息合计，对齐腾讯 */
     var b = basis(code);
     if (b && b.perShare != null) return b.perShare;
     return null;
@@ -869,7 +873,11 @@
       var ctrl = ("AbortController" in window) ? new AbortController() : null;
       var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, QUOTE_TIMEOUT_MS);
       fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
-        .then(function (res) { return res.text(); })
+        .then(function (res) {
+          if (!res.ok) throw new Error("http " + res.status);
+          return res.arrayBuffer(); /* qt.gtimg.cn 返回 GBK 字节，浏览器端解码 */
+        })
+        .then(function (buf) { return new TextDecoder("gbk").decode(buf); })
         .then(function (txt) {
           clearTimeout(timer);
           resolve(applyQuotes(txt, tcodes, codes));
@@ -972,30 +980,60 @@
   }
 
   /* ---------- 分红公告自动抓取 ---------- */
-  /* A股（东方财富 RPT_SHAREBONUS_DET）：含「税前每股分红(PRETAX_BONUS_RMB，每10股)」与「除权除息日」。
+  /* A股（东方财富 RPT_SHAREBONUS_DET，JSONP 零部署）：含「税前每股分红(PRETAX_BONUS_RMB，每10股)」与「除权除息日」。
      抓到后回填 dividendBasis 并自动建收息日历事件。
-     港股(.HK)：东财无数据，改走新浪港股分红页（fetchHKDividendBasis，需 PROXY_URL 代理），
-     仅回填 dividendBasis（金额港元、currency="HKD"），不建收息日历事件（除净日口径不同）；
-     渲染时按 FX 折算人民币显示。 */
+     港股(.HK)：纯前端直连腾讯港股K线接口（web.ifzq.gtimg.cn 自带 CORS，零部署），
+     解析 FHcontent 派息记录按年度归并返回，仅回填 dividendBasis（金额港元、currency="HKD"），
+     不建收息日历事件（除净日口径不同）；渲染时按 FX 折算人民币显示。 */
   var DIVIDEND_TIMEOUT_MS = 8000; /* 单只分红请求超时（毫秒） */
 
+  /* A股分红抓取：默认东财 JSONP 直连（零部署、绕过 CORS）。
+     注意：东财 RPT_SHAREBONUS_DET 只含年报方案，漏中期分红（如云南白药一年派两次会偏低）。
+     若配置了可用的 PROXY_URL（Worker 代理），则优先走新浪（含中期+年报全量、对齐腾讯股息率）。
+     返回 [{perShare, exDate, fy, note}]（每股、含年内多次）。 */
   function fetchDividendBasis(code) {
-    var emCode = code.replace(/\.(SZ|SH|HK)$/i, ""); /* 000538.SZ -> 000519 */
-    var isProxy = !!PROXY_URL;
-    var url = isProxy
-      ? (PROXY_URL + "/em-dividend?code=" + emCode)
-      : ("https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_SHAREBONUS_DET&columns=ALL&filter="
-        + encodeURIComponent('(SECURITY_CODE="' + emCode + '")')
-        + "&pageSize=5&sortColumns=PLAN_NOTICE_DATE&sortTypes=-1&source=WEB&client=WEB");
-    var ctrl = ("AbortController" in window) ? new AbortController() : null;
-    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, DIVIDEND_TIMEOUT_MS);
-    return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
-      .then(function (r) { return r.json(); })
+    var emCode = code.replace(/\.(SZ|SH|HK)$/i, "");
+    if (PROXY_URL) return fetchSinaDividend(emCode);
+    return fetchEmDividend(emCode);
+  }
+
+  /* JSONP 通用工具：script 注入绕过 CORS。东财 datacenter 支持 &callback= 参数。
+     resolve(JSON对象)；超时/脚本错误 → reject。 */
+  var _jsonpSeq = 0;
+  function jsonpGet(url, cbName, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var name = cbName || ("_divCb" + (++_jsonpSeq));
+      var s = document.createElement("script");
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return; done = true;
+        cleanup(); reject(new Error("jsonp timeout"));
+      }, timeoutMs || DIVIDEND_TIMEOUT_MS);
+      window[name] = function (data) {
+        if (done) return; done = true;
+        clearTimeout(timer); cleanup(); resolve(data);
+      };
+      function cleanup() {
+        try { delete window[name]; } catch (e) { window[name] = undefined; }
+        try { if (s.parentNode) s.parentNode.removeChild(s); } catch (e) {}
+      }
+      s.onerror = function () {
+        if (done) return; done = true;
+        clearTimeout(timer); cleanup(); reject(new Error("jsonp error"));
+      };
+      s.src = url + (url.indexOf("?") >= 0 ? "&" : "?") + "callback=" + name;
+      document.body.appendChild(s);
+    });
+  }
+
+  /* 东财 JSONP 直连（零部署）。仅年报方案（RPT_SHAREBONUS_DET 无中期）。 */
+  function fetchEmDividend(emCode) {
+    var url = "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_SHAREBONUS_DET&columns=ALL&filter="
+      + encodeURIComponent('(SECURITY_CODE="' + emCode + '")')
+      + "&pageSize=8&sortColumns=PLAN_NOTICE_DATE&sortTypes=-1&source=WEB&client=WEB";
+    return jsonpGet(url)
       .then(function (j) {
-        clearTimeout(timer);
         var rows = (j && j.result && j.result.data) || [];
-        /* 按「报告期财年(REPORT_DATE)」归并：中报(2025-09-30)与年报(2025-12-31)同属 2025 财年，
-           正确合并；不受除权日跨自然年影响（茅台中报除权常在次年）。仅保留最近一个财年的多条。 */
         var byYear = {};
         for (var i = 0; i < rows.length; i++) {
           var d = rows[i];
@@ -1003,89 +1041,108 @@
           var rep = (d.REPORT_DATE || "").slice(0, 10);
           if (!(d.PRETAX_BONUS_RMB != null && parseFloat(d.PRETAX_BONUS_RMB) > 0
             && /实施|派发|除权/.test(d.ASSIGN_PROGRESS || ""))) continue;
-          /* 财年取报告期年份；无报告期时回退预案公告日(PLAN_NOTICE_DATE，与报告期同财年)，
-             仍无则回退除权日年份（边缘情况，可能把中报/年报分到两个年度）。 */
           var y = /^\d{4}/.test(rep) ? rep.slice(0, 4)
             : (/^\d{4}/.test(d.PLAN_NOTICE_DATE || "") ? (d.PLAN_NOTICE_DATE + "").slice(0, 4)
               : (ex.slice(0, 4) || ""));
           if (!/^\d{4}$/.test(y)) continue;
           if (!byYear[y]) byYear[y] = [];
           byYear[y].push({
-            /* 注意：东财 PRETAX_BONUS_RMB 单位是「每10股」，需 ÷10 换算为每股 */
             perShare: parseFloat(d.PRETAX_BONUS_RMB) / 10,
-            exDate: ex,
-            fy: y,
-            note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || (d.SECURITY_NAME_ABBR + " 分红")
+            exDate: ex, fy: y,
+            note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || "分红"
           });
         }
         var yrs = Object.keys(byYear);
         if (!yrs.length) return null;
         var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
-        return byYear[maxYr]; /* 最近一个财年的多条记录（中报+年报合计），对齐腾讯静态股息率 */
+        return byYear[maxYr];
       })
-      .catch(function () { clearTimeout(timer); return null; });
+      .catch(function () { return null; });
   }
 
-  /* 港股分红：抓新浪港股分红页（需 PROXY_URL 代理转发），解析「年度/派息内容/除净日」，
-     按年度归并（同行可能含中期+末期多次派息，港元值累加），返回最近一个年度的
-     [{ perShare: 每股合计港元, exDate: 最新除净日, fy: 年度 }]。金额已是「每股」，无需 ÷10。 */
-  function fetchHKDividendBasis(code) {
-    if (!PROXY_URL) return Promise.resolve(null); /* 港股需代理抓新浪，未配置则跳过 */
-    var hk = code.replace(/\.HK$/i, "");
-    var url = PROXY_URL + "/sina-hk?code=" + hk;
+  /* 新浪分红（经 PROXY_URL 代理转发 money.finance.sina.com.cn，含中期+年报，与腾讯同源）。
+     新浪接口无 CORS 头，浏览器端必须经代理；仅返回 HTML，需 DOMParser 解析。 */
+  function fetchSinaDividend(emCode) {
+    var url = PROXY_URL + "/sina-dividend?code=" + emCode; /* 经 Worker 代理转发新浪（GBK 字节） */
     var ctrl = ("AbortController" in window) ? new AbortController() : null;
     var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, DIVIDEND_TIMEOUT_MS);
     return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
-      .then(function (r) { return r.text(); })
-      .then(function (html) {
+      .then(function (r) {
+        if (!r.ok) throw new Error("http " + r.status);
+        return r.arrayBuffer(); /* Worker 原样转发 GBK 字节，浏览器端用 GBK 解码（浏览器支持） */
+      })
+      .then(function (buf) { return new TextDecoder("gbk").decode(buf); })
+      .then(function (html) { return parseSinaDividendHtml(html); })
+      .catch(function () { clearTimeout(timer); return null; });
+  }
+
+  /* 解析新浪分红 HTML 表格：列 = [公告日, 送股, 转增, 每10股派息(现金), 进度, 除权日, 股权登记日, ...]
+     仅取「已实施」且含现金派息的记录；perShare = 每10股派息 ÷ 10（送股/转增不计入股息率）。 */
+  function parseSinaDividendHtml(html) {
+    if (!html) return null;
+    var doc = new DOMParser().parseFromString(html, "text/html");
+    var rows = doc.querySelectorAll("table tr");
+    var out = [];
+    rows.forEach(function (tr) {
+      var tds = tr.querySelectorAll("td");
+      if (tds.length < 6) return;
+      var ann = (tds[0].textContent || "").trim();
+      var per10 = parseFloat((tds[3].textContent || "").trim());
+      var prog = (tds[4].textContent || "").trim();
+      var ex = (tds[5].textContent || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ex) || isNaN(per10) || per10 <= 0 || !/实施/.test(prog)) return;
+      var fy = ex.slice(0, 4);
+      out.push({ perShare: per10 / 10, exDate: ex, fy: fy, note: "分红(新浪)" });
+    });
+    return out.length ? out : null;
+  }
+
+  /* 港股分红：纯前端直连腾讯港股K线接口（web.ifzq.gtimg.cn 自带 CORS，ACAO=*），无需代理。
+     腾讯K线第7字段(索引6)带除权除息对象 FHcontent(派息内容)+cqr(除净日)。
+     按除净日年份归并港元值，返回最近年度 [{ fy, perShare(每股合计港元), exDate, note }]。
+     金额已是「每股」，无需 ÷10。无现金派息返回 null。 */
+  function fetchHKDividendBasis(code) {
+    var hk = code.replace(/\.HK$/i, "");
+    var hkCode = "hk" + hk;
+    var url = "https://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?param="
+      + hkCode + ",day,2019-01-01,2026-08-25,1000,qfq";
+    var ctrl = ("AbortController" in window) ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, DIVIDEND_TIMEOUT_MS);
+    return fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
+      .then(function (r) {
+        if (!r.ok) throw new Error("http " + r.status);
+        return r.json();
+      })
+      .then(function (j) {
         clearTimeout(timer);
-        var doc = new DOMParser().parseFromString(html, "text/html");
-        var tables = doc.querySelectorAll("table");
-        var table = null;
-        for (var ti = 0; ti < tables.length; ti++) {
-          var tt = (tables[ti].textContent || "");
-          if (tt.indexOf("除净日") >= 0 && tt.indexOf("派息内容") >= 0) { table = tables[ti]; break; }
-        }
-        if (!table) return null;
-        var rows = table.querySelectorAll("tr");
-        var headerMap = null, yearIdx = -1, contentIdx = -1, exIdx = -1;
+        var node = j && j.data && j.data[hkCode];
+        var arr = (node && (node.qfqday || node.day)) || [];
         var byYear = {};
-        for (var i = 0; i < rows.length; i++) {
-          var cells = rows[i].querySelectorAll("td,th");
-          if (cells.length < 4) continue;
-          var txts = Array.prototype.map.call(cells, function (c) { return (c.textContent || "").trim(); });
-          /* 表头行：含「年度」「除净日」即作为列映射 */
-          if (!headerMap && txts.some(function (x) { return /年度/.test(x); })
-            && txts.some(function (x) { return /除净日/.test(x); })) {
-            for (var k = 0; k < txts.length; k++) {
-              if (/年度/.test(txts[k]) && yearIdx < 0) yearIdx = k;
-              if (/派息内容|派息/.test(txts[k]) && contentIdx < 0) contentIdx = k;
-              if (/除净日/.test(txts[k]) && exIdx < 0) exIdx = k;
-            }
-            if (yearIdx >= 0 && contentIdx >= 0) headerMap = {};
-            continue;
-          }
-          if (!headerMap) continue;
-          var year = txts[yearIdx];
-          var content = txts[contentIdx] || "";
-          var exCell = txts[exIdx] || "";
-          if (!/^\d{4}$/.test(year || "")) continue;
-          /* 同行可能含多次派息（中期+末期），全部港元值累加 */
-          var ms = content.match(/([\d.]+)\s*港元/g) || [];
+        for (var i = 0; i < arr.length; i++) {
+          var row = arr[i];
+          if (!row || row.length < 7) continue;
+          var fx = row[6];
+          if (!fx || typeof fx !== "object" || !fx.FHcontent) continue;
+          var cqr = fx.cqr || row[0] || "";
+          var fy = cqr.slice(0, 4);
+          if (!/^\d{4}$/.test(fy)) continue;
+          var ms = fx.FHcontent.match(/[\d.]+港元/g) || [];
           var hkd = 0;
-          ms.forEach(function (s) { hkd += parseFloat(s.replace(/[^\d.]/g, "")) || 0; });
+          for (var k = 0; k < ms.length; k++) hkd += parseFloat(ms[k].replace(/[^\d.]/g, "")) || 0;
           if (!(hkd > 0)) continue;
-          var exm = exCell.match(/(\d{4}-\d{2}-\d{2})/);
-          var exDate = exm ? exm[1] : "";
-          if (!byYear[year]) byYear[year] = { sum: 0, exDate: "" };
-          byYear[year].sum += hkd;
-          if (exDate && exDate > byYear[year].exDate) byYear[year].exDate = exDate;
+          if (!byYear[fy]) byYear[fy] = { sum: 0, exDate: "" };
+          byYear[fy].sum += hkd;
+          if (cqr > byYear[fy].exDate) byYear[fy].exDate = cqr;
         }
         var yrs = Object.keys(byYear);
         if (!yrs.length) return null;
         var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
-        return [{ perShare: byYear[maxYr].sum, exDate: byYear[maxYr].exDate, fy: maxYr,
-          note: "港股分红(新浪)" }];
+        return [{
+          fy: maxYr,
+          perShare: Math.round(byYear[maxYr].sum * 10000) / 10000,
+          exDate: byYear[maxYr].exDate,
+          note: "港股分红(腾讯)"
+        }];
       })
       .catch(function () { clearTimeout(timer); return null; });
   }
