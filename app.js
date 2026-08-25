@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251149";
+  var APP_VERSION = "1.0.08251350";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -1156,8 +1156,12 @@
            港股不建事件（除净日口径不同，且已有 dividendBasis 算年股息/股息率）。 */
         if (t.isHolding && !isHK) {
           if (!state.dividendEvents) state.dividendEvents = [];
-          var shares = t.lots ? t.lots.filter(function (l) { return l.type === "buy"; })
-            .reduce(function (s, l) { return s + (parseFloat(l.shares) || 0); }, 0) : 0;
+          /* 净持股数（buy - sell），与 calcHolding 口径一致；减仓后事件股数应同步减少 */
+          var shares = t.lots ? t.lots.reduce(function (s, l) {
+            var sh = parseFloat(l.shares) || 0;
+            return s + (l.type === "sell" ? -sh : sh);
+          }, 0) : 0;
+          if (shares < 0) shares = 0;
           /* 先清掉该代码所有「非手动录入」的旧事件（含旧版无标记残留/自动抓取），避免叠加 */
           state.dividendEvents = state.dividendEvents.filter(function (e) {
             return !(e.code === t.code && e.manual !== true);
@@ -1282,6 +1286,14 @@
         price: px,
         fee: 0
       });
+      /* 同步收息日历：该代码所有「非手动录入」事件的股数改为当前净持股，
+         使减仓后「今年已收」能即时减少（与 autoFetchDividends 口径一致） */
+      var netShares = calcHolding(hh).shares;
+      if (state.dividendEvents && netShares >= 0) {
+        state.dividendEvents.forEach(function (e) {
+          if (e.code === sc && e.manual !== true) e.shares = netShares;
+        });
+      }
       saveState(); renderAll();
       toast((isInc ? "加仓 ＋100" : "减仓 －100") + " 股（市价 " + px + "）：" + (hh.name || sc));
       return;
