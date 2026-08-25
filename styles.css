@@ -82,6 +82,11 @@ main { padding: 14px; }
 .ss-item:hover, .ss-item.active { background: var(--brand-soft); }
 .ss-name { font-weight: 600; color: var(--text); }
 .ss-code { font-size: 12px; color: var(--muted); }
+.ss-live {
+  font-style: normal; font-size: 10px; color: #fff; background: var(--brand);
+  border-radius: 4px; padding: 0 4px; margin-left: 4px; vertical-align: middle;
+}
+.ss-loading { padding: 8px 12px; font-size: 13px; color: var(--muted); }
 /* 行内链接式按钮（补分红等） */
 .link-btn {
   border: none; background: none; color: var(--amber); font-size: 12px;

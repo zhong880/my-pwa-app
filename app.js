@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08241454";
+  var APP_VERSION = "1.0.08251032";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -368,8 +368,8 @@
     holding: {
       title: "新增持仓（买入）",
       fields: [
+        { k: "name", label: "名称", ph: "云南白药 / 输入可模糊搜索", req: true },
         { k: "code", label: "代码", ph: "000538.SZ / 00700.HK", req: true },
-        { k: "name", label: "名称", ph: "云南白药", req: true },
         { k: "market", label: "市场", type: "select", opts: ["A", "HK", "B"], def: "A" },
         { k: "date", label: "买入日期", ph: "2024-03-01", req: true },
         { k: "shares", label: "股数", ph: "1000", def: "100", req: true, num: true },
@@ -391,16 +391,39 @@
     watch: {
       title: "新增心选",
       fields: [
+        { k: "name", label: "名称", ph: "中国平安 / 输入可模糊搜索", req: true },
         { k: "code", label: "代码", ph: "601318.SH", req: true },
-        { k: "name", label: "名称", ph: "中国平安", req: true },
         { k: "market", label: "市场", type: "select", opts: ["A", "HK", "B"], def: "A" },
-        { k: "group", label: "分组", ph: "保险" },
-        { k: "targetPrice", label: "目标价", ph: "55", num: true },
+        { k: "group", label: "分组（可选）", ph: "保险" },
+        { k: "targetPrice", label: "目标价（自动反推）", ph: "55", num: true },
         { k: "targetYield", label: "目标股息率(%)", ph: "5.5", num: true }
       ]
     }
   };
   var curType = null;
+
+  /* 用户缓存股票库（仅本机持久，不污染 STOCK_DB 源文件）：选中实时项时写入 localStorage。
+     换设备/换浏览器不会同步——仅本人本机下次打开也能本地搜到。 */
+  var LS_STOCKDB_KEY = "jar_stockdb_user_v1";
+  function loadUserStockDB() {
+    try { return JSON.parse(localStorage.getItem(LS_STOCKDB_KEY) || "[]") || []; } catch (e) { return []; }
+  }
+  function saveUserStock(code, name) {
+    if (!code || !name) return;
+    var arr = loadUserStockDB();
+    if (arr.some(function (x) { return x.code === code; })) return; /* 已存在则跳过 */
+    arr.push({ code: code, name: name });
+    try { localStorage.setItem(LS_STOCKDB_KEY, JSON.stringify(arr)); } catch (e) {}
+  }
+  /* 启动时把用户缓存库并入运行时 STOCK_DB 内存（刷新后从源文件重新加载，再合并） */
+  function mergeUserStockDB() {
+    if (!window.STOCK_DB) return;
+    loadUserStockDB().forEach(function (s) {
+      if (!window.STOCK_DB.some(function (x) { return x.code === s.code; })) {
+        window.STOCK_DB.push({ code: s.code, name: s.name });
+      }
+    });
+  }
 
   /* 在股票代码库 STOCK_DB 中按名称/代码模糊搜索（最多 12 条） */
   function searchStockDB(q) {
@@ -415,6 +438,63 @@
       }
     }
     return res;
+  }
+
+  /* 腾讯 smartbox 实时股票搜索（JSONP，零代理，浏览器直连）：用于「本地 STOCK_DB 没有」时的模糊补全。
+     返回标准格式 [{code:"600519.SH"|"00700.HK", name, live:true}]，仅含股票(GP)，最多 12 条。 */
+  function toStdCode(market, code) {
+    if (market === "sh") return code + ".SH";
+    if (market === "sz") return code + ".SZ";
+    if (market === "hk") return code + ".HK";
+    return null; /* 美股/指数/权证等暂不纳入 */
+  }
+  function parseSmartbox(txt) {
+    var m = (txt || "").match(/v_hint="?([^"\n]*)"?/);
+    var body = m ? m[1] : (txt || "");
+    var segs = body.split("^");
+    var out = [];
+    for (var i = 0; i < segs.length; i++) {
+      var seg = segs[i].split("~");
+      if (seg.length < 5) continue;
+      if (seg[4] !== "GP") continue; /* 只要股票，过滤指数/权证 */
+      var full = toStdCode(seg[0], seg[1]);
+      if (!full) continue;
+      out.push({ code: full, name: seg[2], live: true });
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+  var _liveLock = false;
+  function searchStockLive(q) {
+    if (_liveLock) return Promise.resolve([]); /* 单飞，避免并发覆盖 window.v_hint */
+    return new Promise(function (resolve) {
+      var s = document.createElement("script");
+      s.src = "https://smartbox.gtimg.cn/s3/?v=2&t=all&q=" + encodeURIComponent(q);
+      var done = false;
+      _liveLock = true;
+      function finish() {
+        if (done) return; done = true; _liveLock = false;
+        try { document.body.removeChild(s); } catch (e) {}
+        var txt = window.v_hint || "";
+        try { window.v_hint = ""; } catch (e) {}
+        resolve(parseSmartbox(txt));
+      }
+      s.onload = finish;
+      s.onerror = function () { if (done) return; done = true; _liveLock = false;
+        try { document.body.removeChild(s); } catch (e) {} resolve([]); };
+      document.body.appendChild(s);
+      setTimeout(finish, 6000); /* 超时兜底 */
+    });
+  }
+  /* 渲染名称搜索下拉（本地或实时结果共用） */
+  function renderSuggest(box, list, isLive) {
+    if (!list || !list.length) { box.hidden = true; box.innerHTML = ""; return; }
+    box.innerHTML = list.map(function (m) {
+      return '<div class="ss-item" data-code="' + m.code + '" data-name="' + m.name + '">' +
+        '<span class="ss-name">' + m.name + '</span>' +
+        '<span class="ss-code">' + m.code + (m.live ? ' <em class="ss-live">实时</em>' : '') + '</span></div>';
+    }).join("");
+    box.hidden = false;
   }
 
   /* 填代码后自动带出名称 + 当前股价（行情缺失则实时拉一次） */
@@ -432,6 +512,84 @@
         if (q.price && priceEl && !priceEl.value) priceEl.value = q.price;
       });
     }
+  }
+
+  /* 取某代码的「年每股分红」：与持仓渲染口径一致——
+     优先 dividendEvents 最近一个财年(fy)内多条派息事件合计，回退 dividendBasis.perShare。无则 null。 */
+  function annualPerShareOf(code) {
+    if (!code) return null;
+    var yrOf = {};
+    (state.dividendEvents || []).forEach(function (e) {
+      if (e.code !== code) return;
+      var y = e.fy || (e.exDate ? e.exDate.slice(0, 4) : null);
+      if (y && /^\d{4}$/.test(y)) yrOf[y] = (yrOf[y] || 0) + parseFloat(e.perShare || 0);
+    });
+    var yrs = Object.keys(yrOf);
+    if (yrs.length) {
+      var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
+      return yrOf[maxYr];
+    }
+    var b = basis(code);
+    if (b && b.perShare != null) return b.perShare;
+    return null;
+  }
+
+  /* 心选：填了目标股息率后，用分红数据反推目标价 = 年每股分红 / (目标股息率/100)。
+     仅本地无分红数据时，按本工程抓取方式（东财 A 股 / 新浪港股）抓取一次，抓到再反推。
+     仅在目标价尚为空时自动填入（不覆盖用户手动填写），作为参考值。 */
+  var _divFetching = {}; /* 按 code 去重，避免 oninput 高频重复抓取 */
+  function ensureDividendBasis(code, name, isHK) {
+    if (annualPerShareOf(code) != null) return Promise.resolve(false); /* 已有数据，无需抓 */
+    if (_divFetching[code]) return _divFetching[code]; /* 进行中，复用同一结果 */
+    var p = (isHK ? fetchHKDividendBasis(code) : fetchDividendBasis(code))
+      .then(function (infos) {
+        delete _divFetching[code];
+        if (!infos || !infos.length) return false;
+        var annualPerShare = infos.reduce(function (s, info) {
+          return s + (parseFloat(info.perShare) || 0);
+        }, 0);
+        if (!(annualPerShare > 0)) return false;
+        /* 与打开页面自动抓取同一口径回填 dividendBasis（心选不建收息日历事件） */
+        if (!state.dividendBasis) state.dividendBasis = {};
+        var cur = state.dividendBasis[code] || {};
+        if (!(cur.label && /手动/.test(cur.label))) {
+          state.dividendBasis[code] = {
+            perShare: cur.perShare != null ? Math.max(cur.perShare, annualPerShare) : annualPerShare,
+            currency: isHK ? "HKD" : (cur.currency || "CNY"),
+            label: cur.label || (name + (isHK ? " 港股分红(新浪)" : " 自动抓取分红兜底"))
+          };
+        }
+        saveState();
+        return true;
+      })
+      .catch(function () { delete _divFetching[code]; return false; });
+    _divFetching[code] = p;
+    return p;
+  }
+
+  function autoFillTargetPrice() {
+    var codeEl = form.elements["code"], yEl = form.elements["targetYield"], pEl = form.elements["targetPrice"];
+    if (!codeEl || !yEl || !pEl) return;
+    var code = codeEl.value.trim();
+    var y = parseFloat(yEl.value);
+    if (!code || !y) return;
+    if (pEl.value.trim()) return; /* 已手动填目标价，不覆盖 */
+    var ps = annualPerShareOf(code);
+    if (ps != null) { pEl.value = (ps / (y / 100)).toFixed(2); return; }
+    /* 本地无分红数据：按本工程方式抓取一次，成功后再反推目标价 */
+    var isHK = code.indexOf(".HK") >= 0;
+    var nm = (form.elements["name"] || {}).value || code;
+    ensureDividendBasis(code, nm, isHK).then(function (ok) {
+      if (!ok) return;
+      /* 表单已被用户改动则放弃回填 */
+      if (form.elements["code"].value.trim() !== code) return;
+      if (form.elements["targetYield"].value.trim() !== String(y)) return;
+      var ps2 = annualPerShareOf(code);
+      if (ps2 != null && !form.elements["targetPrice"].value.trim()) {
+        form.elements["targetPrice"].value = (ps2 / (y / 100)).toFixed(2);
+        toast("已抓取 " + nm + " 分红数据并反推目标价");
+      }
+    });
   }
 
   function openModal(type) {
@@ -454,36 +612,48 @@
         if (type === "holding" && f.k === "date") dv = localDateStr(new Date());
         ctrl = '<input name="' + f.k + '" placeholder="' + (f.ph || "") + '"' +
           (f.num ? ' inputmode="decimal"' : '') + ' value="' + dv + '" />';
-        /* 持仓表单：名称输入框下方挂模糊搜索下拉 */
-        if (type === "holding" && f.k === "name") {
+        /* 持仓/心选表单：名称输入框下方挂模糊搜索下拉 */
+        if ((type === "holding" || type === "watch") && f.k === "name") {
           ctrl += '<div class="stock-suggest" data-suggest hidden></div>';
         }
       }
       div.innerHTML = lab + ctrl;
       form.appendChild(div);
     });
-    /* 持仓表单：名称模糊搜索 + 代码自动带出名称/股价 */
-    if (type === "holding") {
+    /* 持仓/心选表单：名称模糊搜索 + 代码自动带出名称/股价；心选额外支持目标股息率反推目标价 */
+    if (type === "holding" || type === "watch") {
       form.oninput = function (e) {
         var el = e.target;
         if (!el) return;
         if (el.name === "code") {
           autoFillByCode(el.value);
+          if (type === "watch") autoFillTargetPrice(); /* 代码变了，重新尝试反推 */
         } else if (el.name === "name") {
           var q = el.value.trim();
           var box = form.querySelector("[data-suggest]");
           if (!box) return;
           if (!q) { box.hidden = true; box.innerHTML = ""; return; }
-          var matches = searchStockDB(q);
-          if (!matches.length) { box.hidden = true; box.innerHTML = ""; return; }
-          box.innerHTML = matches.map(function (m) {
-            return '<div class="ss-item" data-code="' + m.code + '" data-name="' + m.name + '">' +
-              '<span class="ss-name">' + m.name + '</span><span class="ss-code">' + m.code + '</span></div>';
-          }).join("");
-          box.hidden = false;
+          var local = searchStockDB(q);
+          if (local.length >= 3) {
+            /* 本地命中足够，直接用本地清单，不发实时请求 */
+            renderSuggest(box, local, false);
+          } else {
+            /* 本地不足：先展示本地（若有），再发起腾讯实时搜索兜底/补全 */
+            if (local.length) renderSuggest(box, local, false);
+            else { box.innerHTML = '<div class="ss-loading">实时搜索中…</div>'; box.hidden = false; }
+            searchStockLive(q).then(function (live) {
+              if (form.elements["name"].value.trim() !== q) return; /* 输入已变，丢弃旧结果 */
+              var merged = local.concat(live.filter(function (l) {
+                return !local.some(function (x) { return x.code === l.code; });
+              }));
+              renderSuggest(box, merged, live.length > 0);
+            });
+          }
+        } else if (el.name === "targetYield" && type === "watch") {
+          autoFillTargetPrice(); /* 目标股息率变化时，用分红数据反推目标价 */
         }
       };
-      /* 选中下拉项：填名称 + 代码，并触发股价自动填充 */
+      /* 选中下拉项：填名称 + 代码，触发股价自动填充；心选额外反推目标价 */
       form.onclick = function (e) {
         var it = e.target.closest ? e.target.closest(".ss-item") : null;
         if (!it) return;
@@ -493,7 +663,9 @@
         if (codeEl) codeEl.value = code;
         var box = form.querySelector("[data-suggest]");
         if (box) box.hidden = true;
+        saveUserStock(code, name); /* 选中即写入本机用户缓存库，下次本地可搜 */
         autoFillByCode(code);
+        if (type === "watch") autoFillTargetPrice();
       };
       /* 失焦时延迟关闭下拉（避免点选项前先消失） */
       var nameInput = form.elements["name"];
@@ -1111,6 +1283,7 @@
   updateEye();
   var verTag = document.getElementById("verTag");
   if (verTag) verTag.textContent = "v" + APP_VERSION;
+  mergeUserStockDB(); /* 把本机用户缓存的股票并入运行时 STOCK_DB，本地搜索可命中 */
   renderAll();
   /* 每次打开自动拉取最新行情：GitHub Pages / 手机端也能自动更新 */
   refreshPrices();
