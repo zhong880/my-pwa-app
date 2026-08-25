@@ -69,6 +69,11 @@ main { padding: 14px; }
   cursor: pointer; padding: 2px 7px; border-radius: 7px; line-height: 1;
 }
 .del-btn:hover { color: var(--red); background: #fdeceb; }
+.edit-btn {
+  border: none; background: none; color: var(--muted); font-size: 15px;
+  cursor: pointer; padding: 2px 7px; border-radius: 7px; line-height: 1;
+}
+.edit-btn:hover { color: var(--brand); background: #eef3ff; }
 /* 名称模糊搜索下拉（新增持仓） */
 .stock-suggest {
   position: absolute; left: 0; right: 0; top: 100%; z-index: 20;

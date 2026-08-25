@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251127";
+  var APP_VERSION = "1.0.08251149";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -331,6 +331,7 @@
         '<span class="code">' + w.code + '</span>' + (w.group ? '<span class="tag">' + w.group + '</span>' : '') + '</span>' +
         '<span class="line1-right">' +
         (yld != null ? '<span class="yield-badge">' + yld.toFixed(2) + '%</span>' : '<span class="yield-badge">—</span>') +
+        '<button class="edit-btn" data-edit="' + w.code + '" title="编辑心选">✎</button>' +
         '<button class="del-btn" data-del="' + w.code + '" title="删除心选">✕</button>' +
         '</span></div>' +
         '<div class="grid2">' +
@@ -403,6 +404,7 @@
     }
   };
   var curType = null;
+  var curEdit = null; /* 编辑模式：保存时按此对象引用更新已有记录；为 null 表示新增 */
 
   /* 用户缓存股票库（仅本机持久，不污染 STOCK_DB 源文件）：选中实时项时写入 localStorage。
      换设备/换浏览器不会同步——仅本人本机下次打开也能本地搜到。 */
@@ -594,24 +596,27 @@
     });
   }
 
-  function openModal(type) {
+  function openModal(type, editObj) {
     curType = type;
+    curEdit = editObj || null;
     var def = FORM_DEFS[type];
-    document.getElementById("modalTitle").textContent = def.title;
+    document.getElementById("modalTitle").textContent = curEdit ? ("编辑" + def.title.replace(/^新增/, "")) : def.title;
     form.innerHTML = "";
     def.fields.forEach(function (f) {
       var div = document.createElement("div");
       div.className = "field";
       var lab = '<label>' + f.label + (f.req ? " *" : "") + '</label>';
       var ctrl;
+      /* 编辑模式：用已有记录的值作为默认值（新增时用 f.def） */
+      var preset = curEdit && curEdit[f.k] != null ? curEdit[f.k] : (f.def != null ? f.def : "");
       if (f.type === "select") {
         ctrl = '<select name="' + f.k + '">' + f.opts.map(function (o) {
-          return '<option' + (o === f.def ? " selected" : "") + '>' + o + '</option>';
+          return '<option' + (String(o) === String(preset) ? " selected" : "") + '>' + o + '</option>';
         }).join("") + '</select>';
       } else {
-        var dv = f.def || "";
-        /* 持仓表单：买入日期默认填今天 */
-        if (type === "holding" && f.k === "date") dv = localDateStr(new Date());
+        var dv = preset;
+        /* 持仓表单：买入日期默认填今天（仅新增且无值时） */
+        if (type === "holding" && f.k === "date" && !curEdit) dv = localDateStr(new Date());
         ctrl = '<input name="' + f.k + '" placeholder="' + (f.ph || "") + '"' +
           (f.num ? ' inputmode="decimal"' : '') + ' value="' + dv + '" />';
         /* 持仓/心选表单：名称输入框下方挂模糊搜索下拉 */
@@ -730,7 +735,18 @@
         };
       }
     } else if (curType === "watch") {
-      state.watchlist.push(obj);
+      /* 编辑模式：按原对象引用更新该条；新增则 push */
+      var tgt = null;
+      if (curEdit) {
+        (state.watchlist || []).forEach(function (x) { if (x === curEdit) tgt = x; });
+      }
+      if (tgt) {
+        tgt.name = obj.name; tgt.code = obj.code; tgt.market = obj.market;
+        tgt.group = obj.group; tgt.targetPrice = obj.targetPrice; tgt.targetYield = obj.targetYield;
+      } else {
+        state.watchlist.push(obj);
+      }
+      curEdit = null;
     }
     saveState();
     closeModal();
@@ -1294,6 +1310,16 @@
       state.watchlist = (state.watchlist || []).filter(function (x) { return x.code !== code2; });
       saveState(); renderAll(); toast("已删除 " + nm2);
     }
+  });
+
+  /* 心选列表点击（事件委托：编辑） */
+  document.getElementById("watchList").addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest(".edit-btn") : null;
+    if (!b) return;
+    var code2 = b.dataset.edit;
+    var w2 = null;
+    (state.watchlist || []).forEach(function (x) { if (x.code === code2) w2 = x; });
+    if (w2) openModal("watch", w2); /* 编辑模式：按原有信息预填 */
   });
 
   updateEye();
