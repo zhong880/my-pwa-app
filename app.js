@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251433";
+  var APP_VERSION = "1.0.08251442";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -1017,10 +1017,13 @@
             note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || (d.SECURITY_NAME_ABBR + " 分红")
           });
         }
-        var yrs = Object.keys(byYear);
+        var yrs = Object.keys(byYear).sort(function (a, c) { return c > a ? 1 : -1; });
         if (!yrs.length) return null;
-        var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
-        return byYear[maxYr]; /* 仅返回最近一个财年的多条记录（中报+年报合计） */
+        /* 返回最近两个财年的全部记录（中报+年报各自一条），供 TTM 口径（两财年合计）使用 */
+        var pick = yrs.slice(0, 2);
+        var out = [];
+        pick.forEach(function (y) { byYear[y].forEach(function (r) { out.push(r); }); });
+        return out;
       })
       .catch(function () { clearTimeout(timer); return null; });
   }
@@ -1080,11 +1083,12 @@
           byYear[year].sum += hkd;
           if (exDate && exDate > byYear[year].exDate) byYear[year].exDate = exDate;
         }
-        var yrs = Object.keys(byYear);
+        var yrs = Object.keys(byYear).sort(function (a, c) { return c > a ? 1 : -1; });
         if (!yrs.length) return null;
-        var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
-        return [{ perShare: byYear[maxYr].sum, exDate: byYear[maxYr].exDate, fy: maxYr,
-          note: "港股分红(新浪)" }];
+        /* 返回最近两个年度（各一行），供 TTM 口径（两财年合计）使用 */
+        return yrs.slice(0, 2).map(function (y) {
+          return { perShare: byYear[y].sum, exDate: byYear[y].exDate, fy: y, note: "港股分红(新浪)" };
+        });
       })
       .catch(function () { clearTimeout(timer); return null; });
   }
