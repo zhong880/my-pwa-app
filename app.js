@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251442";
+  var APP_VERSION = "1.0.08251450";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -105,10 +105,10 @@
     (state.dividendEvents || []).forEach(function (e) {
       if (e.code === h.code && (!e.exDate || e.exDate <= todayStr)) cum += (e.perShare || 0) * shares;
     });
-    // 预计年股息：用 TTM 口径（最近两个财年 perShare 合计 × 股数），与股息率、收息日历预测一致。
+    // 预计年股息：用「最近财年 perShare 合计 × 股数」口径，与股息率、收息日历预测一致（对齐腾讯静态股息率）。
     var annualPerShare = annualPerShareOf(h.code);
     var annualDiv = (annualPerShare != null) ? annualPerShare * shares : null;
-    /* 股息率显示用 TTM 口径（最近两财年合计），对齐腾讯自选股；annualDiv 仍用单财年口径（年度预测不动） */
+    /* 股息率显示用「最近财年 perShare 合计 ÷ 现价」，对齐腾讯自选股 */
     var yld = (annualPerShareOf(h.code) != null && p) ? annualPerShareOf(h.code) / p * 100 : null;
     var payback = (cost) ? cum / cost * 100 : null;
     return { shares: shares, cost: cost, mv: mv, profit: profit, profitPct: profitPct,
@@ -205,8 +205,8 @@
     var todayStr = localDateStr(today);
     var yr = today.getFullYear();
 
-    /* 年度派息预测：TTM 口径 = 每只股票「最近两个财年(fy) perShare 合计」× 股数，
-       与股息率、持仓卡片「预计年股息」口径一致（对齐腾讯自选股）。币种换算保留原 amountCNY 处理。 */
+    /* 年度派息预测：用「最近财年(fy) perShare 合计」× 股数，与股息率、持仓卡片「预计年股息」口径一致
+       （对齐腾讯静态股息率，非两年 TTM）。币种换算保留原 amountCNY 处理。 */
     var predictedAnnual = 0;
     (state.holdings || []).forEach(function (h) {
       var c = calcHolding(h);
@@ -298,7 +298,7 @@
     ws.forEach(function (w) {
       var p = price(w.code);
       var b = basis(w.code);
-      /* 股息率显示用 TTM 口径（最近两财年合计），对齐腾讯自选股 */
+      /* 股息率显示用「最近财年 perShare 合计 ÷ 现价」，对齐腾讯自选股静态股息率 */
       var yld = (annualPerShareOf(w.code) != null && p) ? annualPerShareOf(w.code) / p * 100 : null;
       /* 三档目标：价格达成 = 现价≤目标价；股息达成 = 当前股息率≥目标 */
       var tiers = [
@@ -524,10 +524,11 @@
     }
   }
 
-  /* 取某代码的「每股年分红」：对齐腾讯自选股「股息率」口径 = 最近两个财年(fy)派息合计
-     （年报次年春除权常跨自然年，单最新财年口径会漏掉上一笔已实施分红，导致股息率偏低）。
-     用于：股息率显示 + 心选目标股息率反推目标价。回退 dividendBasis.perShare。无则 null。
-     注：收息日历的「年度派息预测/已收」仍用单财年(fy)口径，不在本函数影响范围。 */
+  /* 取某代码的「每股年分红」：对齐腾讯自选股「股息率」口径 = 最近一个财年(fy)派息合计
+     （中报+年报同属一财年，已正确合计；年报次年春除权跨自然年不影响，因按 fy 归并）。
+     用于：股息率显示 + 预计年股息 + 收息日历预测 + 心选目标股息率反推目标价。
+     回退 dividendBasis.perShare。无则 null。
+     注：腾讯的股息率是「最近财年派息 ÷ 现价」的静态股息率，并非两年 TTM（那样会对一年派一次的股票翻倍）。 */
   function annualPerShareOf(code) {
     if (!code) return null;
     var yrOf = {};
@@ -537,7 +538,7 @@
       if (y && /^\d{4}$/.test(y)) yrOf[y] = (yrOf[y] || 0) + parseFloat(e.perShare || 0);
     });
     var yrs = Object.keys(yrOf).sort(function (a, b) { return b > a ? 1 : -1; });
-    if (yrs.length) return yrOf[yrs[0]] + (yrs[1] ? yrOf[yrs[1]] : 0); /* 最近两财年合计 */
+    if (yrs.length) return yrOf[yrs[0]]; /* 最近一个财年 perShare 合计（中报+年报），对齐腾讯 */
     var b = basis(code);
     if (b && b.perShare != null) return b.perShare;
     return null;
@@ -1017,13 +1018,10 @@
             note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || (d.SECURITY_NAME_ABBR + " 分红")
           });
         }
-        var yrs = Object.keys(byYear).sort(function (a, c) { return c > a ? 1 : -1; });
+        var yrs = Object.keys(byYear);
         if (!yrs.length) return null;
-        /* 返回最近两个财年的全部记录（中报+年报各自一条），供 TTM 口径（两财年合计）使用 */
-        var pick = yrs.slice(0, 2);
-        var out = [];
-        pick.forEach(function (y) { byYear[y].forEach(function (r) { out.push(r); }); });
-        return out;
+        var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
+        return byYear[maxYr]; /* 最近一个财年的多条记录（中报+年报合计），对齐腾讯静态股息率 */
       })
       .catch(function () { clearTimeout(timer); return null; });
   }
@@ -1083,12 +1081,11 @@
           byYear[year].sum += hkd;
           if (exDate && exDate > byYear[year].exDate) byYear[year].exDate = exDate;
         }
-        var yrs = Object.keys(byYear).sort(function (a, c) { return c > a ? 1 : -1; });
+        var yrs = Object.keys(byYear);
         if (!yrs.length) return null;
-        /* 返回最近两个年度（各一行），供 TTM 口径（两财年合计）使用 */
-        return yrs.slice(0, 2).map(function (y) {
-          return { perShare: byYear[y].sum, exDate: byYear[y].exDate, fy: y, note: "港股分红(新浪)" };
-        });
+        var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
+        return [{ perShare: byYear[maxYr].sum, exDate: byYear[maxYr].exDate, fy: maxYr,
+          note: "港股分红(新浪)" }];
       })
       .catch(function () { clearTimeout(timer); return null; });
   }
