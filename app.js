@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08251402";
+  var APP_VERSION = "1.0.08251427";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   var PROXY_URL = ""; /* 可选：填 Cloudflare Worker 代理地址则用 fetch；留空则用 JSONP 直连 qt.gtimg.cn（零部署即可跨域） */
@@ -121,7 +121,8 @@
       annualPerShare = yrOf[maxYr];
     } else if (b && b.perShare != null) annualPerShare = b.perShare;
     var annualDiv = (annualPerShare != null) ? annualPerShare * shares : null;
-    var yld = (annualPerShare != null && p) ? annualPerShare / p * 100 : null;
+    /* 股息率显示用 TTM 口径（最近两财年合计），对齐腾讯自选股；annualDiv 仍用单财年口径（年度预测不动） */
+    var yld = (annualPerShareOf(h.code) != null && p) ? annualPerShareOf(h.code) / p * 100 : null;
     var payback = (cost) ? cum / cost * 100 : null;
     return { shares: shares, cost: cost, mv: mv, profit: profit, profitPct: profitPct,
              yield: yld, annualDiv: annualDiv, cumDiv: cum, payback: payback,
@@ -324,7 +325,8 @@
     ws.forEach(function (w) {
       var p = price(w.code);
       var b = basis(w.code);
-      var yld = (b && p) ? b.perShare / p * 100 : null;
+      /* 股息率显示用 TTM 口径（最近两财年合计），对齐腾讯自选股 */
+      var yld = (annualPerShareOf(w.code) != null && p) ? annualPerShareOf(w.code) / p * 100 : null;
       /* 三档目标：价格达成 = 现价≤目标价；股息达成 = 当前股息率≥目标 */
       var tiers = [
         { tp: w.targetPrice1, ty: w.targetYield1 },
@@ -549,8 +551,10 @@
     }
   }
 
-  /* 取某代码的「年每股分红」：与持仓渲染口径一致——
-     优先 dividendEvents 最近一个财年(fy)内多条派息事件合计，回退 dividendBasis.perShare。无则 null。 */
+  /* 取某代码的「每股年分红」：对齐腾讯自选股「股息率」口径 = 最近两个财年(fy)派息合计
+     （年报次年春除权常跨自然年，单最新财年口径会漏掉上一笔已实施分红，导致股息率偏低）。
+     用于：股息率显示 + 心选目标股息率反推目标价。回退 dividendBasis.perShare。无则 null。
+     注：收息日历的「年度派息预测/已收」仍用单财年(fy)口径，不在本函数影响范围。 */
   function annualPerShareOf(code) {
     if (!code) return null;
     var yrOf = {};
@@ -559,11 +563,8 @@
       var y = e.fy || (e.exDate ? e.exDate.slice(0, 4) : null);
       if (y && /^\d{4}$/.test(y)) yrOf[y] = (yrOf[y] || 0) + parseFloat(e.perShare || 0);
     });
-    var yrs = Object.keys(yrOf);
-    if (yrs.length) {
-      var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
-      return yrOf[maxYr];
-    }
+    var yrs = Object.keys(yrOf).sort(function (a, b) { return b > a ? 1 : -1; });
+    if (yrs.length) return yrOf[yrs[0]] + (yrs[1] ? yrOf[yrs[1]] : 0); /* 最近两财年合计 */
     var b = basis(code);
     if (b && b.perShare != null) return b.perShare;
     return null;
@@ -602,9 +603,13 @@
     return p;
   }
 
-  /* 反推只作用于主档①（目标价①/目标股息率①）；②/③ 由用户手动填写 */
-  function autoFillTargetPrice() {
-    var codeEl = form.elements["code"], yEl = form.elements["targetYield1"], pEl = form.elements["targetPrice1"];
+  /* 反推目标价：填某档目标股息率 N（targetYieldN）→ 用分红数据反推该档目标价（targetPriceN）。
+     三档都支持（N=1/2/3）。本地无数据时按本工程方式抓取一次再反推。不覆盖手动填的目标价。 */
+  function autoFillTargetPrice(n) {
+    n = n || 1;
+    var codeEl = form.elements["code"];
+    var yEl = form.elements["targetYield" + n];
+    var pEl = form.elements["targetPrice" + n];
     if (!codeEl || !yEl || !pEl) return;
     var code = codeEl.value.trim();
     var y = parseFloat(yEl.value);
@@ -619,11 +624,11 @@
       if (!ok) return;
       /* 表单已被用户改动则放弃回填 */
       if (form.elements["code"].value.trim() !== code) return;
-      if (form.elements["targetYield"].value.trim() !== String(y)) return;
+      if (form.elements["targetYield" + n].value.trim() !== String(y)) return;
       var ps2 = annualPerShareOf(code);
-      if (ps2 != null && !form.elements["targetPrice"].value.trim()) {
-        form.elements["targetPrice"].value = (ps2 / (y / 100)).toFixed(2);
-        toast("已抓取 " + nm + " 分红数据并反推目标价");
+      if (ps2 != null && !form.elements["targetPrice" + n].value.trim()) {
+        form.elements["targetPrice" + n].value = (ps2 / (y / 100)).toFixed(2);
+        toast("已抓取 " + nm + " 分红数据并反推第" + n + "档目标价");
       }
     });
   }
@@ -666,7 +671,7 @@
         if (!el) return;
         if (el.name === "code") {
           autoFillByCode(el.value);
-          if (type === "watch") autoFillTargetPrice(); /* 代码变了，重新尝试反推 */
+          if (type === "watch") [1, 2, 3].forEach(autoFillTargetPrice); /* 代码变了，三档都尝试反推 */
         } else if (el.name === "name") {
           var q = el.value.trim();
           var box = form.querySelector("[data-suggest]");
@@ -688,8 +693,8 @@
               renderSuggest(box, merged, live.length > 0);
             });
           }
-        } else if (el.name === "targetYield1" && type === "watch") {
-          autoFillTargetPrice(); /* 目标股息率①变化时，用分红数据反推目标价① */
+        } else if (/^targetYield[123]$/.test(el.name) && type === "watch") {
+          autoFillTargetPrice(+el.name.slice(-1)); /* 填某档目标股息率 → 反推该档目标价 */
         }
       };
       /* 选中下拉项：填名称 + 代码，触发股价自动填充；心选额外反推目标价 */
@@ -704,7 +709,7 @@
         if (box) box.hidden = true;
         saveUserStock(code, name); /* 选中即写入本机用户缓存库，下次本地可搜 */
         autoFillByCode(code);
-        if (type === "watch") autoFillTargetPrice();
+        if (type === "watch") [1, 2, 3].forEach(autoFillTargetPrice); /* 选中后三档都尝试反推 */
       };
       /* 失焦时延迟关闭下拉（避免点选项前先消失） */
       var nameInput = form.elements["name"];
