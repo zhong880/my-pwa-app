@@ -316,15 +316,42 @@
     var ws = state.watchlist || [];
     var list = document.getElementById("watchList");
     list.innerHTML = "";
+    /* 旧数据兼容：单档 targetPrice/targetYield 回退到①档 */
+    ws.forEach(function (w) {
+      if (w.targetPrice != null && w.targetPrice1 == null) w.targetPrice1 = w.targetPrice;
+      if (w.targetYield != null && w.targetYield1 == null) w.targetYield1 = w.targetYield;
+    });
     ws.forEach(function (w) {
       var p = price(w.code);
       var b = basis(w.code);
       var yld = (b && p) ? b.perShare / p * 100 : null;
-      var toPrice = (p != null && w.targetPrice) ? p <= w.targetPrice : false;
-      var toYield = (yld != null && w.targetYield) ? yld >= w.targetYield : false;
-      var tag = "";
-      if (toPrice) tag += '<span class="tag buy">≤目标价 可关注</span>';
-      if (toYield) tag += '<span class="tag high">高息区</span>';
+      /* 三档目标：价格达成 = 现价≤目标价；股息达成 = 当前股息率≥目标 */
+      var tiers = [
+        { tp: w.targetPrice1, ty: w.targetYield1 },
+        { tp: w.targetPrice2, ty: w.targetYield2 },
+        { tp: w.targetPrice3, ty: w.targetYield3 }
+      ];
+      var tags = [];
+      tiers.forEach(function (t, i) {
+        var reach = false, label = "";
+        if (p != null && t.tp) {
+          if (p <= t.tp) { reach = true; label = "①②③④⑤⑥⑦⑧⑨".charAt(i) + "价"; }
+        }
+        if (yld != null && t.ty) {
+          if (yld >= t.ty) { reach = true; label += (label ? "+" : "") + "息"; }
+        }
+        if (reach) tags.push('<span class="tag buy">第' + (i + 1) + '档达成' + (label ? "·" + label : "") + '</span>');
+      });
+      var tagHtml = tags.length ? tags.join("") : "";
+      /* 三档行 */
+      var tierRows = tiers.map(function (t, i) {
+        var tpStr = t.tp ? money(t.tp, w.code) : "—";
+        var tyStr = t.ty != null ? t.ty + "%" : "—";
+        var okP = (p != null && t.tp) ? (p <= t.tp) : false;
+        var okY = (yld != null && t.ty) ? (yld >= t.ty) : false;
+        return item("目标价" + "①②③".charAt(i), tpStr + (okP ? " ✓" : "")) +
+               item("目标股息率" + "①②③".charAt(i), tyStr + (okY ? " ✓" : ""));
+      }).join("");
       var row = document.createElement("div");
       row.className = "row";
       row.innerHTML = '<div class="line1"><span><span class="name">' + w.name + '</span>' +
@@ -336,10 +363,10 @@
         '</span></div>' +
         '<div class="grid2">' +
         item("现价", p != null ? money(p, w.code) : "—") +
-        item("目标价", w.targetPrice ? money(w.targetPrice, w.code) : "—") +
         item("当前股息率", yld != null ? pct(yld) : "—") +
-        item("目标股息率", w.targetYield ? w.targetYield + "%" : "—") +
-        '</div>' + (tag ? '<div style="margin-top:8px">' + tag + '</div>' : '');
+        '</div>' +
+        '<div class="grid2" style="margin-top:6px">' + tierRows + '</div>' +
+        (tagHtml ? '<div style="margin-top:8px">' + tagHtml + '</div>' : '');
       list.appendChild(row);
     });
     if (!ws.length) list.innerHTML = '<div class="row code">暂无心选，点下方“新增心选”</div>';
@@ -398,8 +425,12 @@
         { k: "code", label: "代码", ph: "601318.SH", req: true },
         { k: "market", label: "市场", type: "select", opts: ["A", "HK", "B"], def: "A" },
         { k: "group", label: "分组（可选）", ph: "保险" },
-        { k: "targetPrice", label: "目标价（自动反推）", ph: "55", num: true },
-        { k: "targetYield", label: "目标股息率(%)", ph: "5.5", num: true }
+        { k: "targetPrice1", label: "目标价①", num: true, ph: "55" },
+        { k: "targetYield1", label: "目标股息率①(%)", num: true, ph: "5.5" },
+        { k: "targetPrice2", label: "目标价②", num: true, ph: "50" },
+        { k: "targetYield2", label: "目标股息率②(%)", num: true, ph: "6.0" },
+        { k: "targetPrice3", label: "目标价③", num: true, ph: "45" },
+        { k: "targetYield3", label: "目标股息率③(%)", num: true, ph: "6.5" }
       ]
     }
   };
@@ -571,8 +602,9 @@
     return p;
   }
 
+  /* 反推只作用于主档①（目标价①/目标股息率①）；②/③ 由用户手动填写 */
   function autoFillTargetPrice() {
-    var codeEl = form.elements["code"], yEl = form.elements["targetYield"], pEl = form.elements["targetPrice"];
+    var codeEl = form.elements["code"], yEl = form.elements["targetYield1"], pEl = form.elements["targetPrice1"];
     if (!codeEl || !yEl || !pEl) return;
     var code = codeEl.value.trim();
     var y = parseFloat(yEl.value);
@@ -656,8 +688,8 @@
               renderSuggest(box, merged, live.length > 0);
             });
           }
-        } else if (el.name === "targetYield" && type === "watch") {
-          autoFillTargetPrice(); /* 目标股息率变化时，用分红数据反推目标价 */
+        } else if (el.name === "targetYield1" && type === "watch") {
+          autoFillTargetPrice(); /* 目标股息率①变化时，用分红数据反推目标价① */
         }
       };
       /* 选中下拉项：填名称 + 代码，触发股价自动填充；心选额外反推目标价 */
@@ -735,14 +767,24 @@
         };
       }
     } else if (curType === "watch") {
-      /* 编辑模式：按原对象引用更新该条；新增则 push */
+      /* 重复校验：新增时若代码已在心选列表，则禁止重复添加 */
+      if (!curEdit) {
+        var dup = (state.watchlist || []).some(function (x) { return x.code === obj.code; });
+        if (dup) {
+          toast("「" + (obj.name || obj.code) + " (" + obj.code + ")」已在心选列表，不可重复添加");
+          return;
+        }
+      }
+      /* 编辑模式：按原对象引用更新该条（含 3 档目标）；新增则 push */
       var tgt = null;
       if (curEdit) {
         (state.watchlist || []).forEach(function (x) { if (x === curEdit) tgt = x; });
       }
       if (tgt) {
-        tgt.name = obj.name; tgt.code = obj.code; tgt.market = obj.market;
-        tgt.group = obj.group; tgt.targetPrice = obj.targetPrice; tgt.targetYield = obj.targetYield;
+        tgt.name = obj.name; tgt.code = obj.code; tgt.market = obj.market; tgt.group = obj.group;
+        tgt.targetPrice1 = obj.targetPrice1; tgt.targetYield1 = obj.targetYield1;
+        tgt.targetPrice2 = obj.targetPrice2; tgt.targetYield2 = obj.targetYield2;
+        tgt.targetPrice3 = obj.targetPrice3; tgt.targetYield3 = obj.targetYield3;
       } else {
         state.watchlist.push(obj);
       }
