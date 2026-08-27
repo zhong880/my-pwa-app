@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08260847";
+  var APP_VERSION = "1.0.08270843";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   /* 代理开关：Worker/pages.dev 国内不可达，走零部署 JSONP 直连东财分红接口。
@@ -326,7 +326,9 @@
         var tyStr = t.ty != null ? t.ty + "%" : "—";
         var okP = (p != null && t.tp) ? (p <= t.tp) : false;
         var okY = (yld != null && t.ty) ? (yld >= t.ty) : false;
-        return item("目标价" + "①②③".charAt(i), tpStr + (okP ? " ✓" : "")) +
+        /* 同时满足「目标价≤现价」且「当前股息率≥目标股息率」→ 目标价文字标红 */
+        var hit = okP && okY;
+        return item("目标价" + "①②③".charAt(i), tpStr + (okP ? " ✓" : ""), hit ? "red" : "") +
                item("目标股息率" + "①②③".charAt(i), tyStr + (okY ? " ✓" : ""));
       }).join("");
       var row = document.createElement("div");
