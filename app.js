@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08270843";
+  var APP_VERSION = "1.0.08281404";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   /* 代理开关：Worker/pages.dev 国内不可达，走零部署 JSONP 直连东财分红接口。
@@ -301,7 +301,8 @@
       var p = price(w.code);
       var b = basis(w.code);
       /* 股息率显示用「最近财年 perShare 合计 ÷ 现价」，对齐腾讯自选股静态股息率 */
-      var yld = (annualPerShareOf(w.code) != null && p) ? annualPerShareOf(w.code) / p * 100 : null;
+      var ps = annualPerShareOf(w.code); /* 当前每股年分红（随分红公告抓取自动更新） */
+      var yld = (ps != null && p) ? ps / p * 100 : null;
       /* 三档目标：价格达成 = 现价≤目标价；股息达成 = 当前股息率≥目标 */
       var tiers = [
         { tp: w.targetPrice1, ty: w.targetYield1 },
@@ -310,9 +311,12 @@
       ];
       var tags = [];
       tiers.forEach(function (t, i) {
+        /* 该档设了目标股息率且已有年分红 → 目标价随分红公告实时换算 = 年分红 ÷ 目标股息率；
+           仅填目标价的档沿用用户填写的值 */
+        t.tpShow = (t.ty != null && ps != null) ? ps / (t.ty / 100) : (t.tp != null ? t.tp : null);
         var reach = false, label = "";
-        if (p != null && t.tp) {
-          if (p <= t.tp) { reach = true; label = "①②③④⑤⑥⑦⑧⑨".charAt(i) + "价"; }
+        if (p != null && t.tpShow) {
+          if (p <= t.tpShow) { reach = true; label = "①②③④⑤⑥⑦⑧⑨".charAt(i) + "价"; }
         }
         if (yld != null && t.ty) {
           if (yld >= t.ty) { reach = true; label += (label ? "+" : "") + "息"; }
@@ -322,9 +326,10 @@
       var tagHtml = tags.length ? tags.join("") : "";
       /* 三档行 */
       var tierRows = tiers.map(function (t, i) {
-        var tpStr = t.tp ? money(t.tp, w.code) : "—";
+        var tpVal = t.tpShow != null ? t.tpShow : t.tp; /* tags 阶段已算好（含分红实时换算） */
+        var tpStr = tpVal != null ? money(tpVal, w.code) : "—";
         var tyStr = t.ty != null ? t.ty + "%" : "—";
-        var okP = (p != null && t.tp) ? (p <= t.tp) : false;
+        var okP = (p != null && tpVal) ? (p <= tpVal) : false;
         var okY = (yld != null && t.ty) ? (yld >= t.ty) : false;
         /* 同时满足「目标价≤现价」且「当前股息率≥目标股息率」→ 目标价文字标红 */
         var hit = okP && okY;
