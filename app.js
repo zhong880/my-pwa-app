@@ -816,9 +816,10 @@
         if (!obj || typeof obj !== "object" || !Array.isArray(obj.holdings)) throw new Error("不是有效的账本备份");
         if (!confirm("导入将覆盖当前账本（持仓 / 心选 / 派息）。\n确定导入「" + file.name + "」？")) return;
         state.holdings = obj.holdings || [];
-        state.watchlist = obj.watchlist || [];
-        state.dividendEvents = obj.dividendEvents || [];
-        state.dividendBasis = obj.dividendBasis || {};
+        /* 备份里缺心选/派息字段（旧版本备份）时保留现有数据，避免导入清空 */
+        if (obj.watchlist != null) state.watchlist = obj.watchlist;
+        if (obj.dividendEvents != null) state.dividendEvents = obj.dividendEvents;
+        if (obj.dividendBasis != null) state.dividendBasis = obj.dividendBasis;
         if (typeof obj.hideSensitive === "boolean") state.hideSensitive = obj.hideSensitive;
         saveState();
         updateEye();
