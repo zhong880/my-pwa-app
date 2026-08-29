@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08281404";
+  var APP_VERSION = "1.0.08291135";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   /* 代理开关：Worker/pages.dev 国内不可达，走零部署 JSONP 直连东财分红接口。
@@ -1007,9 +1007,10 @@
   var DIVIDEND_TIMEOUT_MS = 8000; /* 单只分红请求超时（毫秒） */
 
   /* A股分红抓取：默认东财 JSONP 直连（零部署、绕过 CORS）。
-     注意：东财 RPT_SHAREBONUS_DET 只含年报方案，漏中期分红（如云南白药一年派两次会偏低）。
-     若配置了可用的 PROXY_URL（Worker 代理），则优先走新浪（含中期+年报全量、对齐腾讯股息率）。
-     返回 [{perShare, exDate, fy, note}]（每股、含年内多次）。 */
+     东财 RPT_SHAREBONUS_DET 实测含全部分红方案（年报+中期+三季报，2026-08 验证），
+     按「滚动12个月、已实施（exDate≤今天）」过滤后返回，与 annualPerShareOf 口径对齐。
+     若配置了可用的 PROXY_URL（Worker 代理），则优先走新浪（含中期+年报全量）。
+     返回 [{perShare, exDate, fy, note}]（每股、可跨财年多笔）。 */
   function fetchDividendBasis(code) {
     var emCode = code.replace(/\.(SZ|SH|HK)$/i, "");
     if (PROXY_URL) return fetchSinaDividend(emCode);
@@ -1045,7 +1046,7 @@
     });
   }
 
-  /* 东财 JSONP 直连（零部署）。仅年报方案（RPT_SHAREBONUS_DET 无中期）。 */
+  /* 东财 JSONP 直连（零部署）。返回滚动12个月内已实施（exDate≤今天）的全部分红，可跨财年。 */
   function fetchEmDividend(emCode) {
     var url = "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_SHAREBONUS_DET&columns=ALL&filter="
       + encodeURIComponent('(SECURITY_CODE="' + emCode + '")')
@@ -1071,10 +1072,20 @@
             note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || "分红"
           });
         }
-        var yrs = Object.keys(byYear);
-        if (!yrs.length) return null;
-        var maxYr = yrs.reduce(function (a, c) { return c > a ? c : a; });
-        return byYear[maxYr];
+        /* 滚动12个月、已实施（exDate≤今天）的全部分红（含中期/三季报，可跨财年），
+           与 annualPerShareOf 的 cutoff 口径对齐；
+           未来已公布方案（exDate>今天）不算进当前股息率，待实际除权后下次抓取自然纳入。 */
+        var all = [];
+        for (var k in byYear) all = all.concat(byYear[k]);
+        if (!all.length) return null;
+        var today = localDateStr(new Date());
+        var cut = new Date();
+        cut.setFullYear(cut.getFullYear() - 1);
+        var cutoff = localDateStr(cut);
+        var picked = all.filter(function (d) {
+          return d.exDate && d.exDate <= today && d.exDate >= cutoff;
+        });
+        return picked.length ? picked : null;
       })
       .catch(function () { return null; });
   }
@@ -1233,7 +1244,7 @@
       var fetcher = isHK ? fetchHKDividendBasis : fetchDividendBasis;
       return fetcher(t.code).then(function (infos) {
         if (!infos || !infos.length) return null;
-        /* 取最近财年每股合计（A股已单财年合并；港股单行已合计） */
+        /* 每股合计（A股为滚动12个月已实施多笔；港股单行已合计） */
         var annualPerShare = infos.reduce(function (s, info) {
           return s + (parseFloat(info.perShare) || 0);
         }, 0);
