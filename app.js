@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.08291235";
+  var APP_VERSION = "1.0.08291356";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   /* 代理开关：Worker/pages.dev 国内不可达，走零部署 JSONP 直连东财分红接口。
@@ -543,12 +543,24 @@
     cut.setFullYear(cut.getFullYear() - 1);
     var cutoff = localDateStr(cut); /* 最近12个月（ISO 字符串可字典序比较） */
     var today = localDateStr(new Date()); /* 上限：未来已公布未实施的派息不计入当前股息率 */
+    /* 跨年双年报修正：窗口内若同时存在多个财年(isAnnual)的年度分红
+       （如年报除权日恰好相隔不足一年，TTM 会短暂含两份年报，如格力 2024年报 ex 2025-08-29
+        与 2025年报 ex 2026-08-27），剔除最早财年的那份年报，避免年度派息预测虚高/看似重复。
+       中期分红不受影响；窗口内只有一份年报时与腾讯 TTM 完全一致。 */
+    var annualFys = [];
+    (state.dividendEvents || []).forEach(function (e) {
+      if (e.code !== code || !e.isAnnual || !e.exDate || e.exDate < cutoff || e.exDate > today) return;
+      if (e.fy && annualFys.indexOf(e.fy) < 0) annualFys.push(e.fy);
+    });
+    var dropFy = annualFys.length >= 2 ? annualFys.sort()[0] : null;
     var sum = 0, has = false;
     (state.dividendEvents || []).forEach(function (e) {
       if (e.code !== code) return;
-      if (e.exDate && e.exDate >= cutoff && e.exDate <= today) { sum += parseFloat(e.perShare || 0); has = true; }
+      if (!(e.exDate && e.exDate >= cutoff && e.exDate <= today)) return;
+      if (dropFy && e.isAnnual && e.fy === dropFy) return; /* 剔除较早财年的年报 */
+      sum += parseFloat(e.perShare || 0); has = true;
     });
-    if (has) return sum; /* 滚动12个月实际派息合计，对齐腾讯 */
+    if (has) return sum; /* 滚动12个月实际派息合计（去跨年双年报），平时对齐腾讯 */
     var b = basis(code);
     if (b && b.perShare != null) return b.perShare;
     return null;
@@ -1080,6 +1092,7 @@
           byYear[y].push({
             perShare: parseFloat(d.PRETAX_BONUS_RMB) / 10,
             exDate: ex, fy: y,
+            isAnnual: /-12-31$/.test(rep), /* 报告期 12-31 = 年度分红，供跨年双年报修正 */
             note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || "分红"
           });
         }
@@ -1308,6 +1321,7 @@
             state.dividendEvents.push({
               code: t.code, name: t.name, exDate: info.exDate, fy: info.fy,
               perShare: info.perShare, shares: shares, note: info.note,
+              isAnnual: info.isAnnual === true,
               auto: true /* 标记为自动抓取来源，供 clearAutoDividendData 识别清除 */
             });
           });
