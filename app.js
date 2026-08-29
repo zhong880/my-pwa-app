@@ -115,6 +115,7 @@
     var payback = (cost) ? cum / cost * 100 : null;
     return { shares: shares, cost: cost, mv: mv, profit: profit, profitPct: profitPct,
              yield: yld, annualDiv: annualDiv, cumDiv: cum, payback: payback,
+             annualPerShare: annualPerShare,
              currency: b ? (b.currency || "CNY") : "CNY" };
   }
 
@@ -173,6 +174,9 @@
           : "—") +
           '<button class="link-btn" data-basis="' + h.code + '" title="补填/修改每股年分红">' +
           (c.annualDiv != null ? "改分红" : "补分红") + '</button>') +
+        item("每股分红", (c.annualPerShare != null
+          ? (c.currency === "HKD" ? money(c.annualPerShare * FX, h.code, true) : money(c.annualPerShare, h.code))
+          : "—")) +
         item("回本进度", c.payback != null ? sen(c.payback.toFixed(1) + "%") : "—") +
         '</div>' +
         (yLabel ? '<div class="code" style="margin-top:6px">' + yLabel + '</div>' : '');
