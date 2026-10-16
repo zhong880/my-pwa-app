@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.10161702";
+  var APP_VERSION = "1.0.10161715";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   /* 代理开关：Worker/pages.dev 国内不可达，走零部署 JSONP 直连东财分红接口。
@@ -319,8 +319,12 @@
 
     var list = document.getElementById("eventList");
     list.innerHTML = "";
-    /* 排序：有除权日的按除权日倒序；预分红公告（无除权日）按其公告日参与排序 */
+    /* 排序：预分红公告（尚未实施）统一置顶，方便一眼看到「接下来要分的钱」；
+       其余按日期倒序（有除权日用除权日，无则用公告日）。 */
+    var isPlanRow = function (e) { return e.plan === true && !(e.exDate && e.exDate <= todayStr); };
     viewEvs.slice().sort(function (a, b) {
+      var pa = isPlanRow(a), pb = isPlanRow(b);
+      if (pa !== pb) return pa ? -1 : 1; /* 预案置顶 */
       var da = a.exDate || a.planDate || "";
       var db = b.exDate || b.planDate || "";
       return (da < db ? 1 : -1);
@@ -1217,8 +1221,11 @@
             isAnnual: /-12-31$/.test(rep), /* 报告期 12-31 = 年度分红，供跨年双年报修正 */
             planDate: planDate,
             progress: prog,
-            /* 未实施（无除权日，或除权日还没到）= 预分红公告 */
-            plan: !(ex && ex <= localDateStr(new Date())),
+            /* 是否「尚未实施」（预分红公告）：以公告进度为准 —— 进度里没有「实施/派发/除权」
+               即为预案（如「董事会预案」「股东大会决议通过」）。
+               注意不能用「除权日是否已过」判断：那会把「已实施分配、但除权日在未来」
+               误标成预案（那属于「预计」，已确定要实施、只等除权）。 */
+            plan: !/实施|派发|除权/.test(prog),
             note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || "分红"
           });
         }
