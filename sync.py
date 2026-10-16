@@ -5,7 +5,9 @@
 - 读取 seed.js 中的代码（持仓 + 心选 + 股息基数键）
 - 通过腾讯 qt.gtimg.cn 拉取实时股价（稳定、无需密钥、覆盖 A/B股/港股）
 - 仅重写 market.js 的行情段，不触碰用户持仓数据
-- 股息率 = seed.js 中 dividendBasis.perShare ÷ 本脚本写入的实时股价（在页面内计算）
+- 股息率 = 页面内计算的「每股年分红 ÷ 本脚本写入的实时股价」
+  （口径见 app.js 宏 DIVIDEND_YIELD_ALIGN_TENCENT，默认腾讯静态口径：最近完整财年合计；
+    无分红事件时回退 seed.js 的 dividendBasis.perShare）
 
 用法：python sync.py
 依赖：仅标准库（urllib）。无第三方包。
