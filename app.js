@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.10161645";
+  var APP_VERSION = "1.0.10161658";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   /* 代理开关：Worker/pages.dev 国内不可达，走零部署 JSONP 直连东财分红接口。
@@ -139,7 +139,9 @@
     var cum = 0;
     var todayStr = localDateStr(new Date()); /* 本地日期，避免 toISOString 的 UTC 偏移 */
     (state.dividendEvents || []).forEach(function (e) {
-      if (e.code === h.code && (!e.exDate || e.exDate <= todayStr)) cum += (e.perShare || 0) * shares;
+      /* 仅已实施的派息计入累计收息：预分红公告（无除权日 / 除权日未到）不计，
+         与股息率、预计年股息口径保持一致 */
+      if (e.code === h.code && e.exDate && e.exDate <= todayStr) cum += (e.perShare || 0) * shares;
     });
     // 预计年股息：用「每股年分红（口径由宏 DIVIDEND_YIELD_ALIGN_TENCENT 决定，默认腾讯静态：最近完整财年合计）
     // × 股数」，与股息率、收息日历预测同源一致。
@@ -262,7 +264,11 @@
     var viewCut = new Date();
     viewCut.setFullYear(viewCut.getFullYear() - 1);
     var viewCutoff = localDateStr(viewCut);
-    var viewEvs = evs.filter(function (e) { return !e.exDate || e.exDate >= viewCutoff; });
+    var viewEvs = evs.filter(function (e) {
+      if (e.exDate) return e.exDate >= viewCutoff;
+      /* 预分红公告无除权日，改用公告日判断是否在展示窗口内 */
+      return !e.planDate || e.planDate >= viewCutoff;
+    });
 
     /* 按事件拆分：已收（除权日已过）/ 预计（未到或待实施），并落月到月度柱 */
     var collectedMonths = new Array(12).fill(0);
@@ -313,21 +319,30 @@
 
     var list = document.getElementById("eventList");
     list.innerHTML = "";
-    viewEvs.slice().sort(function (a, b) { return (a.exDate < b.exDate ? 1 : -1); }).forEach(function (e) {
+    /* 排序：有除权日的按除权日倒序；预分红公告（无除权日）按其公告日参与排序 */
+    viewEvs.slice().sort(function (a, b) {
+      var da = a.exDate || a.planDate || "";
+      var db = b.exDate || b.planDate || "";
+      return (da < db ? 1 : -1);
+    }).forEach(function (e) {
       var amt = amountCNY(e.perShare, e.shares, e.code);
       var passed = e.exDate && e.exDate <= todayStr;
+      /* 三种状态：已收（已除权）/ 预计（已定除权日但未到）/ 预案（已公布尚未实施） */
       var tag = passed
         ? '<span class="tag got">已收</span>'
-        : '<span class="tag will">预计</span>';
+        : (e.plan ? '<span class="tag will">预案</span>' : '<span class="tag will">预计</span>');
+      /* 无除权日的预分红公告显示公告日，便于判断公告时点 */
+      var dateTxt = e.exDate || (e.planDate ? ("公告 " + e.planDate) : "待定");
+      var noteTxt = e.progress ? ((e.note || "分红") + " · " + e.progress) : (e.note || "—");
       var row = document.createElement("div");
       row.className = "row";
       row.innerHTML = '<div class="line1"><span><span class="name">' + e.name + '</span>' +
-        '<span class="code">' + e.exDate + '</span>' + tag + '</span>' +
+        '<span class="code">' + dateTxt + '</span>' + tag + '</span>' +
         '<span class="v" style="font-weight:700">' + money(amt, e.code) + '</span></div>' +
         '<div class="grid2">' +
         item("每股", money(e.perShare, e.code)) +
         item("股数", (e.shares || 0) + " 股") +
-        item("备注", e.note || "—") +
+        item("备注", noteTxt) +
         item("代码", e.code) + '</div>';
       list.appendChild(row);
     });
@@ -665,10 +680,11 @@
         delete _divFetching[code];
         if (!infos || !infos.length) return false;
         /* 与打开页面自动抓取同一口径：腾讯静态口径优先取「最近完整财年」合计，
-           无年报标记（港股单行已按最新除净年度合计）时回退全部明细合计 */
-        var latest = DIVIDEND_YIELD_ALIGN_TENCENT
-          ? latestFyPerShare(infos, localDateStr(new Date())) : null;
+           无年报标记（港股单行已按最新除净年度合计）时回退「已实施」明细合计（预案不计入） */
+        var todayStr = localDateStr(new Date());
+        var latest = DIVIDEND_YIELD_ALIGN_TENCENT ? latestFyPerShare(infos, todayStr) : null;
         var annualPerShare = (latest != null) ? latest : infos.reduce(function (s, info) {
+          if (!(info.exDate && info.exDate <= todayStr)) return s;
           return s + (parseFloat(info.perShare) || 0);
         }, 0);
         if (!(annualPerShare > 0)) return false;
@@ -1127,10 +1143,10 @@
 
   /* A股分红抓取：默认东财 JSONP 直连（零部署、绕过 CORS）。
      东财 RPT_SHAREBONUS_DET 实测含全部分红方案（年报+中期+三季报，2026-08 验证），
-     按「DIVIDEND_FETCH_YEARS 年内、已实施（exDate≤今天）」过滤后返回（含 isAnnual/fy，
-     供腾讯静态口径取「最近完整财年」中期+末期；TTM 口径由计算层再按 12 个月筛）。
+     按「DIVIDEND_FETCH_YEARS 年内」过滤后返回：已实施笔（供股息率/预计年股息/累计收息，
+     含 isAnnual/fy 供腾讯静态口径取「最近完整财年」中期+末期）+ 预分红公告（供收息日历展示）。
      若配置了可用的 PROXY_URL（Worker 代理），则优先走新浪（含中期+年报全量）。
-     返回 [{perShare, exDate, fy, isAnnual, note}]（每股、可跨财年多笔）。 */
+     返回 [{perShare, exDate, fy, isAnnual, planDate, progress, plan, note}]（每股、可跨财年多笔）。 */
   function fetchDividendBasis(code) {
     var emCode = code.replace(/\.(SZ|SH|HK)$/i, "");
     if (PROXY_URL) return fetchSinaDividend(emCode);
@@ -1166,7 +1182,10 @@
     });
   }
 
-  /* 东财 JSONP 直连（零部署）。返回滚动12个月内已实施（exDate≤今天）的全部分红，可跨财年。 */
+  /* 东财 JSONP 直连（零部署）。返回近 DIVIDEND_FETCH_YEARS 年的分红明细（可跨财年）：
+     已实施笔 + 预分红公告（股东大会通过 / 董事会预案 / 除权日在未来）。
+     返回 [{perShare, exDate, fy, isAnnual, planDate, progress, plan, note}]，
+     plan=true 表示尚未实施 —— 计算层会排除，仅供收息日历展示「预分红公告」。 */
   function fetchEmDividend(emCode) {
     var url = "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_SHAREBONUS_DET&columns=ALL&filter="
       + encodeURIComponent('(SECURITY_CODE="' + emCode + '")')
@@ -1179,10 +1198,16 @@
           var d = rows[i];
           var ex = (d.EX_DIVIDEND_DATE || "").slice(0, 10);
           var rep = (d.REPORT_DATE || "").slice(0, 10);
-          if (!(d.PRETAX_BONUS_RMB != null && parseFloat(d.PRETAX_BONUS_RMB) > 0
-            && /实施|派发|除权/.test(d.ASSIGN_PROGRESS || ""))) continue;
+          var prog = d.ASSIGN_PROGRESS || "";
+          var planDate = (d.PLAN_NOTICE_DATE || "").slice(0, 10);
+          /* 只保留有现金派息、且非「不分配 / 取消」的记录。
+             注意：不再只认「已实施」，股东大会决议通过 / 董事会预案 等预分红公告也保留，
+             供收息日历展示（带 plan 标记；计算层会自动排除，不影响股息率与累计收息）。 */
+          if (!(d.PRETAX_BONUS_RMB != null && parseFloat(d.PRETAX_BONUS_RMB) > 0)) continue;
+          if (/不分配|取消|未通过/.test(prog)) continue;
+          if (!/实施|派发|除权|通过|预案|预披露/.test(prog)) continue;
           var y = /^\d{4}/.test(rep) ? rep.slice(0, 4)
-            : (/^\d{4}/.test(d.PLAN_NOTICE_DATE || "") ? (d.PLAN_NOTICE_DATE + "").slice(0, 4)
+            : (/^\d{4}/.test(planDate) ? planDate.slice(0, 4)
               : (ex.slice(0, 4) || ""));
           if (!/^\d{4}$/.test(y)) continue;
           if (!byYear[y]) byYear[y] = [];
@@ -1190,13 +1215,19 @@
             perShare: parseFloat(d.PRETAX_BONUS_RMB) / 10,
             exDate: ex, fy: y,
             isAnnual: /-12-31$/.test(rep), /* 报告期 12-31 = 年度分红，供跨年双年报修正 */
+            planDate: planDate,
+            progress: prog,
+            /* 未实施（无除权日，或除权日还没到）= 预分红公告 */
+            plan: !(ex && ex <= localDateStr(new Date())),
             note: (d.IMPL_PLAN_PROFILE || "").replace(/\s*\(.*\)/, "") || "分红"
           });
         }
-        /* DIVIDEND_FETCH_YEARS 年内、已实施（exDate≤今天）的全部分红（含中期/三季报，可跨财年）。
-           窗口放宽的原因：腾讯静态口径要取「最近完整财年」的中期+末期，若仍按 12 个月过滤，
-           年报除权较晚时会丢掉该财年中期（如平安 2025 中期除权 2025-10-24，2026-08 时已超 12 个月）。
-           未来已公布方案（exDate>今天）不算进当前股息率，待实际除权后下次抓取自然纳入。 */
+        /* 窗口：DIVIDEND_FETCH_YEARS 年内。
+           - 有除权日的记录：保留 [cutoff, 今天+1年]，即已实施笔（供股息率/预计年股息/「已收」）
+             与未来除权笔（供收息日历「预计」）；
+           - 无除权日的记录（预案/未定实施日）：按公告日在 [cutoff, 今天] 内保留，供展示「预分红公告」。
+           窗口放宽到 DIVIDEND_FETCH_YEARS 年的原因：腾讯静态口径要取「最近完整财年」的中期+末期，
+           若按 12 个月过滤，年报除权较晚时会丢掉该财年中期（如平安 2025 中期除权 2025-10-24）。 */
         var all = [];
         for (var k in byYear) all = all.concat(byYear[k]);
         if (!all.length) return null;
@@ -1204,8 +1235,12 @@
         var cut = new Date();
         cut.setFullYear(cut.getFullYear() - DIVIDEND_FETCH_YEARS);
         var cutoff = localDateStr(cut);
+        var fut = new Date();
+        fut.setFullYear(fut.getFullYear() + 1);
+        var futureLimit = localDateStr(fut);
         var picked = all.filter(function (d) {
-          return d.exDate && d.exDate <= today && d.exDate >= cutoff;
+          if (d.exDate) return d.exDate >= cutoff && d.exDate <= futureLimit;
+          return d.planDate && d.planDate >= cutoff && d.planDate <= today;
         });
         return picked.length ? picked : null;
       })
@@ -1335,14 +1370,16 @@
       /* 合并历史残留的双份登记（同 code+exDate 多条）：manual 优先保留一条，
          避免「手动+自动/手误双登」双计股息率与年度派息预测 */
       var keepMap = {};
+      /* 去重键：有除权日用除权日；预分红公告无除权日，改用公告日，避免同代码多个预案互相覆盖 */
+      var evKey = function (e) { return e.code + "|" + (e.exDate || ("plan:" + (e.planDate || ""))); };
       state.dividendEvents.forEach(function (e) {
         if (!e || !e.code) return;
-        var k = e.code + "|" + (e.exDate || "");
+        var k = evKey(e);
         if (!keepMap[k] || (e.manual === true && keepMap[k].manual !== true)) keepMap[k] = e;
       });
       state.dividendEvents = state.dividendEvents.filter(function (e) {
         if (!e || !e.code) return true;
-        return keepMap[e.code + "|" + (e.exDate || "")] === e;
+        return keepMap[evKey(e)] === e;
       });
     }
     if (state.dividendBasis) {
@@ -1357,7 +1394,8 @@
   }
 
   /* 自动抓取分红：持仓 + 心选（去重，含港股）。
-     A 股：东财接口（建收息事件 + 回填 dividendBasis）；
+     A 股：东财接口（建收息事件 + 回填 dividendBasis）—— 收息事件含「已实施」与
+           「预分红公告」（plan=true，仅收息日历展示，不计入股息率/累计收息）；
      港股：新浪接口（仅回填 dividendBasis，金额港元，按汇率折算显示；不建收息日历事件，因港股除净日口径不同）。
      心选：两类都仅回填 dividendBasis，使「当前股息率」自动有数，不建事件。 */
   function autoFetchDividends() {
@@ -1380,25 +1418,29 @@
         if (!infos || !infos.length) return null;
         /* 每股年分红（口径随宏 DIVIDEND_YIELD_ALIGN_TENCENT）：
            腾讯静态口径优先取「最近完整财年」合计（依赖明细里的 isAnnual/fy）；
-           无年报标记时回退全部明细合计 —— 港股 fetchHKDividendBasis 单行已按最新除净年度
-           归并合计，本身就是年度口径，可直接使用。 */
-        var latest = DIVIDEND_YIELD_ALIGN_TENCENT
-          ? latestFyPerShare(infos, localDateStr(new Date())) : null;
+           无年报标记时回退「已实施」明细合计 —— 港股 fetchHKDividendBasis 单行已按最新除净
+           年度归并合计，本身就是年度口径，可直接使用。预案 / 未来除权笔一律不计入。 */
+        var todayStr = localDateStr(new Date());
+        var latest = DIVIDEND_YIELD_ALIGN_TENCENT ? latestFyPerShare(infos, todayStr) : null;
         var annualPerShare = (latest != null) ? latest : infos.reduce(function (s, info) {
+          if (!(info.exDate && info.exDate <= todayStr)) return s; /* 只统计已实施，与股息率口径一致 */
           return s + (parseFloat(info.perShare) || 0);
         }, 0);
-        if (!(annualPerShare > 0)) return null;
-        /* 兜底回填 dividendBasis：心选用它算「当前股息率」；持仓也受益（无事件时有数） */
-        if (!state.dividendBasis) state.dividendBasis = {};
-        var cur = state.dividendBasis[t.code] || {};
-        /* 不覆盖手动补的分红（label 含「手动」） */
-        if (!(cur.label && /手动/.test(cur.label))) {
-          state.dividendBasis[t.code] = {
-            /* 与当前口径保持一致：直接覆盖旧的自动值（旧版 TTM 口径偏高，不可取 max 保留） */
-            perShare: annualPerShare,
-            currency: isHK ? "HKD" : (cur.currency || "CNY"),
-            label: cur.label || (t.name + (isHK ? " 港股分红(新浪)" : " 自动抓取分红兜底"))
-          };
+        /* 兜底回填 dividendBasis：心选用它算「当前股息率」；持仓也受益（无事件时有数）。
+           仅在「已实施」口径有金额时回填 —— 若只有预分红公告（尚未实施），不写入，
+           避免把未实施方案当成当前股息率。 */
+        if (annualPerShare > 0) {
+          if (!state.dividendBasis) state.dividendBasis = {};
+          var cur = state.dividendBasis[t.code] || {};
+          /* 不覆盖手动补的分红（label 含「手动」） */
+          if (!(cur.label && /手动/.test(cur.label))) {
+            state.dividendBasis[t.code] = {
+              /* 与当前口径保持一致：直接覆盖旧的自动值（旧版 TTM 口径偏高，不可取 max 保留） */
+              perShare: annualPerShare,
+              currency: isHK ? "HKD" : (cur.currency || "CNY"),
+              label: cur.label || (t.name + (isHK ? " 港股分红(新浪)" : " 自动抓取分红兜底"))
+            };
+          }
         }
         /* 仅持仓的 A 股才建收息事件（带股数，用于年股息/回本进度）；
            港股不建事件（除净日口径不同，且已有 dividendBasis 算年股息/股息率）。 */
@@ -1414,18 +1456,24 @@
           state.dividendEvents = state.dividendEvents.filter(function (e) {
             return !(e.code === t.code && e.manual !== true);
           });
-          /* 逐条建事件（一年多次分红建多条）；与已有事件同 code+exDate 的笔跳过，
-             避免同一笔派息「手动+自动」双份计入股息率/预计年股息 */
+          /* 逐条建事件（一年多次分红建多条）；与已有事件同一笔（同 code+除权日，
+             预案无除权日时用公告日）的跳过，避免「手动+自动」双份计入 */
           infos.forEach(function (info) {
-            if (!info.exDate || !(parseFloat(info.perShare) > 0)) return;
+            if (!(parseFloat(info.perShare) > 0)) return; /* 预分红公告无除权日也要建事件，供日历展示 */
             var dup = state.dividendEvents.some(function (e) {
-              return e.code === t.code && e.exDate === info.exDate;
+              if (e.code !== t.code) return false;
+              if (info.exDate) return e.exDate === info.exDate;
+              return !e.exDate && e.planDate === info.planDate;
             });
-            if (dup) return; /* 手动已登记同日派息，保留手动的 */
+            if (dup) return; /* 手动已登记同一笔，保留手动的 */
             state.dividendEvents.push({
-              code: t.code, name: t.name, exDate: info.exDate, fy: info.fy,
+              code: t.code, name: t.name, exDate: info.exDate || "", fy: info.fy,
               perShare: info.perShare, shares: shares, note: info.note,
               isAnnual: info.isAnnual === true,
+              planDate: info.planDate || "",
+              progress: info.progress || "",
+              /* 预分红公告（未实施）：不计入股息率 / 预计年股息 / 累计收息，仅在收息日历展示 */
+              plan: info.plan === true,
               auto: true /* 标记为自动抓取来源，供 clearAutoDividendData 识别清除 */
             });
           });
