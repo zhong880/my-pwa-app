@@ -5,9 +5,10 @@
 - 读取 seed.js 中的代码（持仓 + 心选 + 股息基数键）
 - 通过腾讯 qt.gtimg.cn 拉取实时股价（稳定、无需密钥、覆盖 A/B股/港股）
 - 仅重写 market.js 的行情段，不触碰用户持仓数据
-- 股息率 = 页面内计算的「每股年分红 ÷ 本脚本写入的实时股价」
-  （口径见 app.js 宏 DIVIDEND_YIELD_ALIGN_TENCENT，默认腾讯静态口径：最近完整财年合计；
-    无分红事件时回退 seed.js 的 dividendBasis.perShare）
+- 行情段同时写入腾讯口径股息率 dy（腾讯行情 GP- 标志位后第 3 个字段），
+  页面优先用它展示股息率，与腾讯自选股显示值完全一致
+- 股息率兜底 = 页面内计算的「每股年分红 ÷ 本脚本写入的实时股价」
+  （口径见 app.js 宏 DIVIDEND_YIELD_ALIGN_TENCENT；无分红事件时回退 seed.js 的 dividendBasis.perShare）
 
 用法：python sync.py
 依赖：仅标准库（urllib）。无第三方包。
@@ -49,6 +50,19 @@ def to_qt_code(code):
     return code.lower()
 
 
+def parse_yield(fields):
+    """从腾讯行情字段解析股息率(%)：GP-A / GP-A-CYB / GP-A-KCB 等市场标志位之后第 3 个字段。
+    与腾讯自选股显示值同源（实测宁德时代 2.97、中国平安 5.26）；取不到返回 None。"""
+    for i, f in enumerate(fields):
+        if f.startswith("GP-"):
+            try:
+                v = float(fields[i + 3])
+            except (IndexError, ValueError):
+                return None
+            return v if v > 0 else None
+    return None
+
+
 def fetch_prices(qt_codes):
     url = "https://qt.gtimg.cn/q=" + ",".join(qt_codes)
     req = urllib.request.Request(url, headers=UA)
@@ -64,9 +78,13 @@ def fetch_prices(qt_codes):
         if len(p) < 5:
             continue
         try:
-            out[code] = {"name": p[1], "price": float(p[3])}
+            item = {"name": p[1], "price": float(p[3])}
         except ValueError:
             continue
+        dy = parse_yield(p)
+        if dy is not None:
+            item["dy"] = dy
+        out[code] = item
     return out
 
 
@@ -90,6 +108,8 @@ def main():
                 "name": prices[qt_code]["name"],
                 "price": prices[qt_code]["price"],
             }
+            if prices[qt_code].get("dy") is not None:
+                items[seed_code]["dy"] = prices[qt_code]["dy"]  # 腾讯口径股息率(%)
         else:
             print(f"  [warn] 未取到行情: {seed_code}")
 

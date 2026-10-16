@@ -4,7 +4,7 @@
 
   var LS_KEY = "jar_v2";
   /* 版本号：主.次.月日时分（部署时写死，重新推送后改此值即可确认线上是否已更新） */
-  var APP_VERSION = "1.0.10161635";
+  var APP_VERSION = "1.0.10161645";
   var SEED = window.SEED || window.SEED_EXAMPLE || {};
   var LS_MARKET_KEY = "jar_market_v1";
   /* 代理开关：Worker/pages.dev 国内不可达，走零部署 JSONP 直连东财分红接口。
@@ -12,11 +12,13 @@
   var PROXY_URL = "";
 
   /* ---------- 统计口径宏（股息率 / 预计年股息 / 收息日历预测 / 目标价反推共用） ---------- */
-  /* 口径开关 DIVIDEND_YIELD_ALIGN_TENCENT：
-     true  = 腾讯自选股静态口径：取「最近一个已实施年报的财年」该财年全部已实施分红
-             （该财年中期 + 年报末期）合计。
-     false = 原有 TTM 口径：滚动 12 个月已除权合计（含跨年双年报修正）。
-     两套实现都保留在本文件中（latestFyPerShare / ttmPerShareOf），改此宏即可随时切换。 */
+  /* 首选口径：腾讯行情自带的股息率字段（tencentYield → annualPerShareOf 第 1 优先级）。
+     它与腾讯自选股显示值同源，因此无需再猜口径、也不会受东财分红明细缺笔（如特别分红）影响。
+     下面的宏只在「行情未刷新 / 该标的无股息率字段」时作为本地回退口径生效：
+       DIVIDEND_YIELD_ALIGN_TENCENT = true  → 静态财年口径：最近一个已实施年报的财年，
+                                              该财年中期 + 年报末期已实施分红合计；
+       DIVIDEND_YIELD_ALIGN_TENCENT = false → 原有 TTM 口径：滚动 12 个月已除权合计（含跨年双年报修正）。
+     两套本地实现都保留在本文件中（latestFyPerShare / ttmPerShareOf），改此宏即可随时切换。 */
   var DIVIDEND_YIELD_ALIGN_TENCENT = true;
 
   /* 分红明细抓取窗口（年）。腾讯静态口径需要「最近完整财年」的中期 + 年报末期都落在
@@ -76,6 +78,24 @@
   function price(code) {
     var it = MARKET.items && MARKET.items[code];
     return it ? it.price : null;
+  }
+  /* 取腾讯行情自带的股息率（%）。该字段与腾讯自选股显示值同源（实测宁德时代 2.97、中国平安 5.26），
+     主要用于对齐腾讯口径，免去本地推算的口径偏差；行情未刷新/无该字段时为 null。 */
+  function tencentYield(code) {
+    var it = MARKET.items && MARKET.items[code];
+    return (it && it.dy != null) ? it.dy : null;
+  }
+  /* 从腾讯行情字段数组解析股息率：GP-A / GP-A-CYB / GP-A-KCB 等市场标志位之后第 3 个字段
+     即为该股息率（A 股实测位于第 64 位，此处按标志位定位，避免板块差异导致错位）。 */
+  function parseTencentYield(fields) {
+    if (!fields) return null;
+    for (var i = 0; i < fields.length; i++) {
+      if (/^GP-/.test(fields[i])) {
+        var v = parseFloat(fields[i + 3]);
+        return (isNaN(v) || v <= 0) ? null : v;
+      }
+    }
+    return null;
   }
   /* 取某代码的股息基数：优先用运行时录入的（state），回退到 SEED 预设 */
   function basis(code) {
@@ -560,17 +580,26 @@
     }
   }
 
-  /* 取某代码的「每股年分红」，口径由宏 DIVIDEND_YIELD_ALIGN_TENCENT 决定：
-     - true（默认，对齐腾讯自选股）：最近一个已实施年报所在财年的已实施分红合计；
-     - false：原有 TTM 口径（滚动 12 个月已除权合计 + 跨年双年报修正）。
-     用于：股息率显示 + 预计年股息 + 收息日历预测 + 心选目标股息率反推目标价。
-     两口径都无可用事件（含港股，不建事件）则回退 dividendBasis.perShare。无则 null。 */
+  /* 取某代码的「每股年分红」。优先级从高到低：
+     1) 腾讯行情自带股息率 × 现价（与腾讯自选股同源，100% 对齐，务必放最前）；
+     2) 本地分红事件按宏 DIVIDEND_YIELD_ALIGN_TENCENT 计算：
+        true  = 最近一个已实施年报所在财年的已实施分红合计（静态财年口径）；
+        false = 原有 TTM 口径（滚动 12 个月已除权合计 + 跨年双年报修正）；
+     3) dividendBasis.perShare（手动补录 / 港股兜底）。
+     用于：股息率显示 + 预计年股息 + 收息日历预测 + 心选目标股息率反推目标价。 */
   function annualPerShareOf(code) {
     if (!code) return null;
+    /* 1) 行情口径优先：反推每股年分红 = 股息率% × 现价 ÷ 100，
+       使「股息率 = 每股年分红 ÷ 现价」自洽，显示值与腾讯自选股完全一致。 */
+    var dy = tencentYield(code);
+    var p = price(code);
+    if (dy != null && p) return dy / 100 * p;
+    /* 2) 无行情股息率时，用本地分红事件按宏口径计算 */
     var evs = (state.dividendEvents || []).filter(function (e) { return e.code === code; });
     var today = localDateStr(new Date());
     var v = DIVIDEND_YIELD_ALIGN_TENCENT ? latestFyPerShare(evs, today) : ttmPerShareOf(evs, today);
     if (v != null) return v;
+    /* 3) 兜底 */
     var b = basis(code);
     if (b && b.perShare != null) return b.perShare;
     return null;
@@ -942,7 +971,7 @@
       if (p.length < 5) return null;
       var price = parseFloat(p[3]);
       if (isNaN(price) || price <= 0) return null;
-      return { code: code, name: p[1], price: price };
+      return { code: code, name: p[1], price: price, dy: parseTencentYield(p) };
     } catch (e) { return null; }
   }
 
@@ -961,6 +990,7 @@
           if (!orig) return;
           if (!MARKET.items[orig]) MARKET.items[orig] = {};
           MARKET.items[orig].price = r.price;
+          if (r.dy != null) MARKET.items[orig].dy = r.dy; /* 腾讯口径股息率，随行情更新 */
           if (r.name && !MARKET.items[orig].name) MARKET.items[orig].name = r.name;
           ok++;
           return;
@@ -1010,11 +1040,14 @@
         tcodes.forEach(function (tc, i) {
           var raw = window["v_" + tc];
           if (!raw) return;
-          var p = parseFloat(raw.split("~")[3]);
+          var f = raw.split("~");
+          var p = parseFloat(f[3]);
           if (!isNaN(p) && p > 0) {
             var orig = codes[i];
             if (!MARKET.items[orig]) MARKET.items[orig] = {};
             MARKET.items[orig].price = p;
+            var dy = parseTencentYield(f); /* JSONP 通道同样带股息率字段 */
+            if (dy != null) MARKET.items[orig].dy = dy;
             ok++;
           }
         });
